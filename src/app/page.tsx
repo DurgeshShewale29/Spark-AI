@@ -554,9 +554,16 @@ function HomeContent() {
         
         data["/app/layout.tsx"] = `import "./globals.css";\n\nexport default function RootLayout({ children }: { children: React.ReactNode }) {\n  return (\n    <html lang="en" suppressHydrationWarning>\n      <head>\n        <script dangerouslySetInnerHTML={{ __html: "window.addEventListener('error', function(e) { window.parent.postMessage({type: 'SPARK_RUNTIME_ERROR', message: e.message}, '*'); }); window.addEventListener('unhandledrejection', function(e) { window.parent.postMessage({type: 'SPARK_RUNTIME_ERROR', message: e.reason ? e.reason.message || e.reason : 'Unknown Promise Rejection'}, '*'); }); const originalConsoleError = console.error; console.error = function(...args) { let msg = args[0] instanceof Error ? args[0].message : (typeof args[0] === 'string' ? args[0] : String(args[0])); if (msg && !msg.includes('Warning:')) { window.parent.postMessage({type: 'SPARK_RUNTIME_ERROR', message: msg}, '*'); } originalConsoleError.apply(console, args); };" }} />\n      </head>\n      <body suppressHydrationWarning className="antialiased bg-[#0a0a0a] text-white min-h-screen">\n        {children}\n      </body>\n    </html>\n  );\n}`;
         
-        // 🚀 FIX: Forcefully overwrite globals.css on ALL new projects to strip out hallucinated @apply classes
+        // Ensure standard Next.js path exists
         data["/app/globals.css"] = `@tailwind base;\n@tailwind components;\n@tailwind utilities;\n\nbody {\n  background-color: #0a0a0a;\n  color: #ffffff;\n}\n`;
       }
+      
+      // 🚀 THE NUCLEAR CSS FIX: Find ANY CSS file the AI hallucinated and neutralize it
+      Object.keys(data).forEach(key => {
+        if (key.endsWith('.css')) {
+          data[key] = `@tailwind base;\n@tailwind components;\n@tailwind utilities;\n\nbody {\n  background-color: #0a0a0a;\n  color: #ffffff;\n}\n`;
+        }
+      });
       
       // 🚀 BONUS FIX: Also protect Vite/React projects from the same error
       const viteCssFiles = ["/src/index.css", "/src/styles.css"];
