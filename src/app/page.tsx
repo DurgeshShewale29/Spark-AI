@@ -142,6 +142,8 @@ function HomeContent() {
   const [menuOpenId, setMenuOpenId] = useState<string | null>(null);
   const [editingChatId, setEditingChatId] = useState<string | null>(null);
   const [editTitle, setEditTitle] = useState("");
+  const [isSelectionMode, setIsSelectionMode] = useState(false);
+  const [selectedChatIds, setSelectedChatIds] = useState<Set<string>>(new Set());
 
   const [abortController, setAbortController] = useState<AbortController | null>(null);
   const [editingMsgIndex, setEditingMsgIndex] = useState<number | null>(null);
@@ -1429,6 +1431,27 @@ function HomeContent() {
     setMenuOpenId(null);
   };
 
+  const batchMoveToTrash = () => {
+    if (selectedChatIds.size === 0) return;
+    
+    const updatedHistory = history.map(h => 
+      selectedChatIds.has(h.id) ? { ...h, isDeleted: true, isPinned: false } : h
+    );
+    
+    saveHistory(updatedHistory);
+    
+    if (currentChatId && selectedChatIds.has(currentChatId)) {
+      setFiles(null);
+      setMessages([]);
+      setInputPrompt("");
+      setCurrentChatId(null);
+      setActiveTab('history');
+    }
+    
+    setIsSelectionMode(false);
+    setSelectedChatIds(new Set());
+  };
+
   const handleRebootSandbox = () => {
     setDetectedError(null); 
     setPreviewKey((prev) => prev + 1); 
@@ -2005,12 +2028,30 @@ function HomeContent() {
             <div className="p-4 space-y-2 overflow-y-auto flex-1 custom-scrollbar">
               
               {activeTab === 'history' && (
-                <button
-                  onClick={handleDevelopNew}
-                  className="w-full bg-gradient-to-r from-blue-600/10 to-blue-500/5 text-blue-400 hover:from-blue-600 hover:to-blue-500 hover:text-white border border-blue-900/50 hover:border-blue-500 font-semibold py-3 rounded-xl flex items-center justify-center gap-2 transition-all duration-300 mb-4 hover:shadow-[0_0_20px_rgba(37,99,235,0.2)] active:scale-[0.98]"
-                >
-                  <Plus size={16} /> Develop New Project
-                </button>
+                isSelectionMode ? (
+                  <div className="flex gap-2 mb-4 animate-in fade-in slide-in-from-top-2 duration-300">
+                    <button
+                      onClick={() => { setIsSelectionMode(false); setSelectedChatIds(new Set()); }}
+                      className="flex-1 bg-gray-800 hover:bg-gray-700 text-gray-300 font-semibold py-3 rounded-xl transition-all"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      onClick={batchMoveToTrash}
+                      disabled={selectedChatIds.size === 0}
+                      className="flex-1 bg-red-600/20 hover:bg-red-600/30 text-red-400 border border-red-500/30 disabled:opacity-50 disabled:active:scale-100 active:scale-[0.98] font-semibold py-3 rounded-xl transition-all flex items-center justify-center gap-2"
+                    >
+                      <Trash2 size={16} /> Trash ({selectedChatIds.size})
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    onClick={handleDevelopNew}
+                    className="w-full bg-gradient-to-r from-blue-600/10 to-blue-500/5 text-blue-400 hover:from-blue-600 hover:to-blue-500 hover:text-white border border-blue-900/50 hover:border-blue-500 font-semibold py-3 rounded-xl flex items-center justify-center gap-2 transition-all duration-300 mb-4 hover:shadow-[0_0_20px_rgba(37,99,235,0.2)] active:scale-[0.98]"
+                  >
+                    <Plus size={16} /> Develop New Project
+                  </button>
+                )
               )}
 
               {activeTab === 'trash' && renderedList.length > 0 && (
@@ -2030,15 +2071,32 @@ function HomeContent() {
                 renderedList.map((chat, index) => (
                   <div 
                     key={chat.id} 
-                    onClick={() => activeTab !== 'trash' && loadChat(chat)} 
-                    className={`group relative flex items-center justify-between p-3.5 rounded-xl transition-all duration-300 ${activeTab !== 'trash' ? 'cursor-pointer' : ''} animate-in slide-in-from-left-4 fade-in fill-mode-backwards ${currentChatId === chat.id ? 'bg-blue-900/10 border-l-4 border-y border-r border-blue-500 shadow-[inset_0_0_20px_rgba(59,130,246,0.05)]' : 'bg-[#13151A] border-l-4 border-l-transparent border-y border-r border-gray-800/80 hover:bg-gray-800/50 hover:border-gray-700/80'}`}
+                    onClick={() => {
+                      if (isSelectionMode) {
+                        const newSet = new Set(selectedChatIds);
+                        if (newSet.has(chat.id)) newSet.delete(chat.id);
+                        else newSet.add(chat.id);
+                        setSelectedChatIds(newSet);
+                      } else if (activeTab !== 'trash') {
+                        loadChat(chat);
+                      }
+                    }} 
+                    className={`group relative flex items-center justify-between p-3.5 rounded-xl transition-all duration-300 ${activeTab !== 'trash' ? 'cursor-pointer' : ''} animate-in slide-in-from-left-4 fade-in fill-mode-backwards ${currentChatId === chat.id && !isSelectionMode ? 'bg-blue-900/10 border-l-4 border-y border-r border-blue-500 shadow-[inset_0_0_20px_rgba(59,130,246,0.05)]' : 'bg-[#13151A] border-l-4 border-l-transparent border-y border-r border-gray-800/80 hover:bg-gray-800/50 hover:border-gray-700/80'} ${isSelectionMode && selectedChatIds.has(chat.id) ? 'bg-blue-900/10 border-blue-500/50' : ''}`}
                     style={{ animationDelay: `${index * 50}ms` }}
                   >
                     
                     <div className="flex items-center gap-3 overflow-hidden flex-1 pl-1">
-                      {chat.isPinned && activeTab !== 'trash' ? <Pin className="w-4 h-4 text-yellow-500 shrink-0 fill-yellow-500/20" /> : <Box className={`w-4 h-4 shrink-0 transition-colors ${currentChatId === chat.id ? 'text-blue-400' : 'text-gray-500 group-hover:text-blue-400/70'}`} />}
+                      {isSelectionMode ? (
+                        <div className={`w-4 h-4 shrink-0 rounded-[4px] border flex items-center justify-center transition-colors ${selectedChatIds.has(chat.id) ? 'bg-blue-500 border-blue-500' : 'border-gray-600 bg-gray-900 group-hover:border-gray-500'}`}>
+                          {selectedChatIds.has(chat.id) && <Check size={12} className="text-white" strokeWidth={3} />}
+                        </div>
+                      ) : chat.isPinned && activeTab !== 'trash' ? (
+                        <Pin className="w-4 h-4 text-yellow-500 shrink-0 fill-yellow-500/20" /> 
+                      ) : (
+                        <Box className={`w-4 h-4 shrink-0 transition-colors ${currentChatId === chat.id ? 'text-blue-400' : 'text-gray-500 group-hover:text-blue-400/70'}`} />
+                      )}
                       
-                      {editingChatId === chat.id && activeTab !== 'trash' ? (
+                      {editingChatId === chat.id && activeTab !== 'trash' && !isSelectionMode ? (
                         <div className="flex items-center gap-2 w-full pr-2">
                           <input 
                             autoFocus
@@ -2092,6 +2150,9 @@ function HomeContent() {
                                   </button>
                                   <button onClick={(e) => togglePin(chat.id, e)} className="flex items-center gap-2 w-full px-4 py-2.5 text-xs font-medium text-gray-300 hover:bg-gray-700 hover:text-white transition-colors">
                                     <Pin size={14}/> {chat.isPinned ? "Unpin Project" : "Pin Project"}
+                                  </button>
+                                  <button onClick={(e) => { e.stopPropagation(); setIsSelectionMode(true); setSelectedChatIds(new Set([chat.id])); setMenuOpenId(null); }} className="flex items-center gap-2 w-full px-4 py-2.5 text-xs font-medium text-gray-300 hover:bg-gray-700 hover:text-white transition-colors">
+                                    <Check size={14}/> Select Multiple
                                   </button>
                                   <div className="h-px bg-gray-700/50 my-1 w-full"></div>
                                   <button onClick={(e) => softDeleteChat(chat.id, e)} className="flex items-center gap-2 w-full px-4 py-2.5 text-xs font-medium text-red-400 hover:bg-gray-700 hover:text-red-300 transition-colors">
