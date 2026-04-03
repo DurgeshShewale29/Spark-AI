@@ -1440,6 +1440,20 @@ function HomeContent() {
     
     saveHistory(updatedHistory);
     
+    // 🚀 NEW: Tell the database to sync these deleted files!
+    if (userId) {
+      selectedChatIds.forEach(id => {
+        const chatToUpdate = updatedHistory.find(h => h.id === id);
+        if (chatToUpdate) {
+          fetch("/api/history/save", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(chatToUpdate),
+          }).catch(() => console.warn("Failed to sync batch trash to DB"));
+        }
+      });
+    }
+    
     if (currentChatId && selectedChatIds.has(currentChatId)) {
       setFiles(null);
       setMessages([]);
