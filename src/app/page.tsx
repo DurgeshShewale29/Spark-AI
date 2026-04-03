@@ -1213,10 +1213,17 @@ function HomeContent() {
         try {
           const diffFiles: Record<string, string> = {};
           Object.entries(cleanData).forEach(([path, content]) => {
-            const cleanPath = path.replace(/^\//, "");
-            diffFiles[cleanPath] = content;
+            // ONLY add the file to the update queue if the content actually changed
+            if (!currentFilesState || currentFilesState[path] !== content) {
+              const cleanPath = path.replace(/^\//, "");
+              diffFiles[cleanPath] = content;
+            }
           });
-          await vmRef.current.applyFsDiff({ create: diffFiles, destroy: [] });
+          
+          // Only trigger the file system update if there are actual changes
+          if (Object.keys(diffFiles).length > 0) {
+            await vmRef.current.applyFsDiff({ create: diffFiles, destroy: [] });
+          }
         } catch {
           setPreviewKey(prev => prev + 1); 
         }
