@@ -233,9 +233,15 @@ function HomeContent() {
             const current = parsedHistory.find(h => h.id === syncChatId);
             if (current) {
               setMessages(current.messages);
-              setFiles(current.files);
               setFramework(current.framework);
-              setPreviewKey(prev => prev + 1);
+              const prevFilesStr = JSON.stringify(filesRef.current || {});
+              const newFilesStr = JSON.stringify(current.files || {});
+              
+              setFiles(current.files);
+              
+              if (prevFilesStr !== newFilesStr) {
+                setPreviewKey(prev => prev + 1);
+              }
             }
           }
         } catch {
@@ -250,17 +256,25 @@ function HomeContent() {
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json();
       if (Array.isArray(data)) {
-        setHistory(data);
-        if (syncChatId) {
-          const current = data.find((h: ChatSession) => h.id === syncChatId);
-          if (current) {
-            setMessages(current.messages);
-            setFiles(current.files);
-            setFramework(current.framework);
-            setPreviewKey(prev => prev + 1);
-          }
-        }
-      }
+                setHistory(data);
+                if (syncChatId) {
+                  const current = data.find((h: ChatSession) => h.id === syncChatId);
+                  if (current) {
+                    setMessages(current.messages);
+                    setFramework(current.framework);
+
+                    // Only reboot the container if the code files ACTUALLY changed
+                    const prevFilesStr = JSON.stringify(filesRef.current || {});
+                    const newFilesStr = JSON.stringify(current.files || {});
+                    
+                    setFiles(current.files);
+                    
+                    if (prevFilesStr !== newFilesStr) {
+                      setPreviewKey(prev => prev + 1);
+                    }
+                  }
+                }
+              }
     } catch {
       console.warn("Background sync paused: Could not load history right now.");
     }
