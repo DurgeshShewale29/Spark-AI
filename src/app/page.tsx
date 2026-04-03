@@ -1431,7 +1431,7 @@ function HomeContent() {
     setMenuOpenId(null);
   };
 
-  const batchMoveToTrash = () => {
+  const batchMoveToTrash = async () => {
     if (selectedChatIds.size === 0) return;
     
     const updatedHistory = history.map(h => 
@@ -1440,18 +1440,21 @@ function HomeContent() {
     
     saveHistory(updatedHistory);
     
-    // 🚀 NEW: Tell the database to sync these deleted files!
+    // 🚀 NEW: Wait for ALL database updates to finish before letting the function complete!
     if (userId) {
-      selectedChatIds.forEach(id => {
+      const syncPromises = Array.from(selectedChatIds).map(id => {
         const chatToUpdate = updatedHistory.find(h => h.id === id);
         if (chatToUpdate) {
-          fetch("/api/history/save", {
+          return fetch("/api/history/save", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(chatToUpdate),
           }).catch(() => console.warn("Failed to sync batch trash to DB"));
         }
+        return Promise.resolve();
       });
+      
+      await Promise.all(syncPromises);
     }
     
     if (currentChatId && selectedChatIds.has(currentChatId)) {
