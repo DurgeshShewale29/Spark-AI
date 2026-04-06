@@ -343,25 +343,46 @@ RULES:
       const genAI = new GoogleGenerativeAI(currentKey!);
 
       try {
-        // AGENT 1: THE INTELLIGENT ROUTER (Scope Detection)
+        // 🚀 AGENT 1: THE INTELLIGENT ROUTER (Scope & Intent Detection)
         const architectModel = genAI.getGenerativeModel({ model: "gemini-2.5-flash", generationConfig: { responseMimeType: "application/json" } });
         const architectPrompt = `You are the Lead Architect routing a task. 
         User Task: "${latestUserMessage}"
         Is Update Mode: ${isUpdateMode}
         
-        Determine the Scope of Work to save tokens.
-        - "frontend_only": UI, CSS, React components.
-        - "backend_only": API routes, db.ts, types.
+        Determine the Scope of Work. 
+        CRITICAL: Distinguish between coding tasks and conversational questions.
+        - "conversation": The user is asking a question, asking for advice/suggestions, or chatting. NO code changes requested.
+        - "frontend_only": User explicitly wants to change UI, CSS, React components.
+        - "backend_only": User explicitly wants to change API routes, db.ts, types.
         - "fullstack": Touches both, or brand new app.
 
         Return strictly this JSON object:
-        { "scope": "frontend_only" | "backend_only" | "fullstack", "filesToModify": ["/path1"], "plan": "1-sentence strategy" }`;
+        { "scope": "conversation" | "frontend_only" | "backend_only" | "fullstack", "filesToModify": ["/path1"], "plan": "1-sentence strategy" }`;
         
         const planResponse = await architectModel.generateContent(architectPrompt);
-        const plan = JSON.parse(planResponse.response.text()); // Changed 'let' to 'const'
-        if (!isUpdateMode) plan.scope = "fullstack";
+        const plan = JSON.parse(planResponse.response.text());
+        if (!isUpdateMode && plan.scope !== "conversation") plan.scope = "fullstack";
 
         const mainModel = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+
+        // 🚀 THE CONVERSATIONAL FAST-TRACK (Bypass Multi-Agent Pipeline)
+        if (plan.scope === "conversation") {
+           const chatPrompt = `${finalPromptText}
+           
+           USER INTENT: The user is asking a question or asking for suggestions.
+           TASK: Respond directly to the user in a friendly, helpful, senior-engineer tone. Provide the suggestions they asked for.
+           CRITICAL RULE: DO NOT generate any <FILE_START>, <UPDATE>, or <DELETE> XML tags. Just output standard markdown text.`;
+
+           streamResult = await mainModel.generateContentStream(chatPrompt);
+           
+           const iterator = streamResult.stream[Symbol.asyncIterator]();
+           const firstYield = await iterator.next();
+           if (!firstYield.done) firstChunk = firstYield.value;
+
+           successfulKey = currentKey!;
+           break keyLoop; // Instantly escape the pipeline!
+        }
+
         let backendGeneratedCode = "";
         let frontendGeneratedCode = "";
         let backendContext = ""; // Used just for context if frontend runs alone
