@@ -269,55 +269,47 @@ You MUST strictly obey these architectural rules and past learnings:\n`;
         .join('\n\n');
     }
 
-    // 🚀 CODEBASE RAG: Pre-Flight Scanner
+    // 🚀 THE CURSOR-PRO CONTEXT ENGINE (Deterministic, Zero-Hallucination)
+    // We abandon the flaky "AI guessing" RAG. Gemini 2.5 has a 1M token window.
+    // Instead, we use deterministic rules to guarantee the Backend Contract is always read.
     let optimizedFiles = currentFiles;
     
     if (isUpdateMode && currentFiles) {
       const allPaths = Object.keys(currentFiles);
+      optimizedFiles = {};
       
-      // Only run the scanner if the codebase gets large enough to matter (> 6 files)
-      if (allPaths.length > 6) {
-        try {
-          const scannerGenAI = new GoogleGenerativeAI(API_KEYS[0]!);
-          const scannerModel = scannerGenAI.getGenerativeModel({ 
-            model: "gemini-2.5-flash", // Fast, cheap model for routing
-            generationConfig: { responseMimeType: "application/json" } // Force strict JSON array
-          });
-          
-          const scannerPrompt = `
-            You are a Senior Architect routing a task.
-            Task: "${latestUserMessage}"
-            
-            Available file paths:
-            ${JSON.stringify(allPaths)}
-            
-            Which files are STRICTLY necessary to read or modify to complete this task? 
-            Return a JSON array of the exact string paths. Max 5 files.
-            ${taggedFiles.length > 0 ? `CRITICAL: You MUST include these tagged files: ${JSON.stringify(taggedFiles)}` : ''}
-          `;
-          
-          const scannerResult = await scannerModel.generateContent(scannerPrompt);
-          const rawScannerText = scannerResult.response.text();
-          // 🚀 FIX: Sanitize Markdown blocks so JSON.parse never crashes
-          const cleanScannerJson = rawScannerText.replace(/```json/gi, '').replace(/```/g, '').trim();
-          const selectedPaths = JSON.parse(cleanScannerJson);
-          
-          if (Array.isArray(selectedPaths) && selectedPaths.length > 0) {
-            optimizedFiles = {};
-            // Always keep core configs + tagged files safe
-            const guaranteedPaths = new Set([...selectedPaths, ...taggedFiles, "/package.json", "/tailwind.config.js"]);
-            
-            allPaths.forEach(path => {
-              if (guaranteedPaths.has(path) || guaranteedPaths.has(path.replace(/^\//, ''))) {
-                optimizedFiles[path] = currentFiles[path];
-              }
-            });
-            console.log(`[RAG] Codebase optimized from ${allPaths.length} down to ${Object.keys(optimizedFiles).length} files.`);
-          }
-        } catch (scannerErr) {
-          console.warn("[RAG] Scanner failed or JSON parsing error. Falling back to full codebase.", scannerErr);
+      const alwaysInclude = new Set([
+        "/package.json", "/tailwind.config.js", "/next.config.js", "/postcss.config.js", "package.json", "tailwind.config.js"
+      ]);
+
+      allPaths.forEach(path => {
+        // 1. Always include configs
+        if (alwaysInclude.has(path) || alwaysInclude.has("/" + path)) {
+          optimizedFiles[path] = currentFiles[path];
+          return;
         }
-      }
+        
+        // 2. Always include the Backend Contract (Zero Hallucination Rule)
+        if (path.includes('/api/') || path.includes('/lib/db') || path.includes('/types') || path.includes('/models')) {
+          optimizedFiles[path] = currentFiles[path];
+          return;
+        }
+
+        // 3. Always include explicitly tagged files (e.g., @page.tsx)
+        const isTagged = taggedFiles && taggedFiles.some((t: string) => path.includes(t.replace(/^@/, '').replace(/^\//, '')));
+        if (isTagged) {
+           optimizedFiles[path] = currentFiles[path];
+           return;
+        }
+
+        // 4. For standard UI components, include them unless the codebase is massive (>20 files).
+        // If it is massive, rely on the user tagging the specific UI component.
+        if (allPaths.length <= 20 || path.includes('page.tsx')) {
+          optimizedFiles[path] = currentFiles[path];
+        }
+      });
+      
+      console.log(`[CONTEXT ENGINE] Passed ${Object.keys(optimizedFiles).length} critical files to Agent.`);
     }
 
     const finalPromptText = isUpdateMode 
@@ -418,7 +410,9 @@ RULES:
         YOUR DIRECTIVE:
         1. Fix duplicate variables, missing brackets, and stray returns.
         2. Ensure valid XML blocks: <FILE_START path="...">, <UPDATE path="...">, or <DELETE path="..." />.
-        3. Do not explain. Just output the final polished XML.`;
+        3. UX & EDUCATION (CRITICAL): Before outputting the XML, you MUST write a brief, friendly explanation of exactly what you changed or built.
+        4. PROMPT SUGGESTIONS: After the explanation, provide 2-3 advanced "Pro Prompts" formatted as bullet points that the user can copy/paste to improve the app further (e.g., "Add optimistic updates for a faster UI", "Implement a drag-and-drop feature").
+        5. Output the explanation and suggestions FIRST, then output the XML blocks.`;
 
         streamResult = await mainModel.generateContentStream(reviewerPrompt);
         
