@@ -297,7 +297,10 @@ You MUST strictly obey these architectural rules and past learnings:\n`;
           `;
           
           const scannerResult = await scannerModel.generateContent(scannerPrompt);
-          const selectedPaths = JSON.parse(scannerResult.response.text());
+          const rawScannerText = scannerResult.response.text();
+          // 🚀 FIX: Sanitize Markdown blocks so JSON.parse never crashes
+          const cleanScannerJson = rawScannerText.replace(/```json/gi, '').replace(/```/g, '').trim();
+          const selectedPaths = JSON.parse(cleanScannerJson);
           
           if (Array.isArray(selectedPaths) && selectedPaths.length > 0) {
             optimizedFiles = {};
@@ -377,8 +380,10 @@ RULES:
            backendGeneratedCode = backendResult.response.text();
            backendContext = backendGeneratedCode;
         } else {
-           const existingBackendPaths = Object.keys(optimizedFiles || {}).filter(p => p.includes('/api/') || p.includes('db.ts') || p.includes('types'));
-           backendContext = existingBackendPaths.length > 0 ? existingBackendPaths.map(p => `--- ${p} ---\n${optimizedFiles[p]}`).join('\n\n') : "No backend context available.";
+           // 🚀 FIX: ALWAYS pull the contract from the full currentFiles, NOT optimizedFiles! 
+           // If we use optimizedFiles, the RAG scanner might hide the APIs, causing the UI to hallucinate endpoints.
+           const existingBackendPaths = Object.keys(currentFiles || {}).filter(p => p.includes('/api/') || p.includes('db.ts') || p.includes('types') || p.includes('models'));
+           backendContext = existingBackendPaths.length > 0 ? existingBackendPaths.map(p => `--- ${p} ---\n${currentFiles[p]}`).join('\n\n') : "No backend context available.";
         }
 
         // AGENT 3: FRONTEND (Runs if fullstack or frontend_only)
