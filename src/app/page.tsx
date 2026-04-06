@@ -191,6 +191,41 @@ function HomeContent() {
     return () => window.removeEventListener('message', handleMessage);
   }, []);
 
+  useEffect(() => {
+    const handleMessage = (e: MessageEvent) => {
+      if (e.data && e.data.type === 'SPARK_RUNTIME_ERROR' && e.data.message) {
+        const msg = String(e.data.message);
+        if (!msg.includes('Warning:') && !msg.includes('Download the React DevTools') && !msg.includes('The resource http')) {
+           setDetectedError(msg);
+        }
+      }
+    };
+    window.addEventListener('message', handleMessage);
+    return () => window.removeEventListener('message', handleMessage);
+  }, []);
+
+  // 🚀 WEBCONTAINER FILE SYSTEM POLLER (Catches Terminal Errors)
+  useEffect(() => {
+    const interval = setInterval(async () => {
+      if (!vmRef.current) return;
+      try {
+        const fsSnapshot = await vmRef.current.getFsSnapshot();
+        if (fsSnapshot && fsSnapshot['.spark_error.log']) {
+          const errContent = fsSnapshot['.spark_error.log'];
+          if (errContent) {
+            setDetectedError("TERMINAL COMPILATION ERROR:\n" + errContent);
+            // Delete the log immediately so we don't trigger an infinite loop
+            await vmRef.current.applyFsDiff({ create: {}, destroy: ['.spark_error.log'] });
+          }
+        }
+      } catch (e) {
+        // Silently ignore SDK sync errors
+      }
+    }, 1500); // Check every 1.5 seconds
+
+    return () => clearInterval(interval);
+  }, []);
+
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const vmRef = useRef<VM | null>(null);
   const filesRef = useRef<ProjectFiles | null>(null);
@@ -485,12 +520,56 @@ function HomeContent() {
         basePkg.dependencies = { ...basePkg.dependencies, "vue": "3.5.11", "lucide-vue-next": "0.454.0" };
         basePkg.devDependencies = { "vite": "5.4.8", "@vitejs/plugin-vue": "5.1.4", "tailwindcss": "3.4.4", "postcss": "8.4.38", "autoprefixer": "10.4.19" };
     } else if (framework === "angular") {
-        basePkg.scripts = { start: "ng serve", build: "ng build" };
+        basePkg.scripts = { dev: "ng serve", start: "ng serve", build: "ng build" };
         basePkg.dependencies = { ...basePkg.dependencies, "@angular/core": "^17.0.0", "@angular/common": "^17.0.0", "rxjs": "~7.8.0", "zone.js": "~2.0.0" };
         basePkg.devDependencies = { "@angular/cli": "^17.0.0", "typescript": "~5.2.2" };
     }
 
+    // 🚀 THE TERMINAL BLINDNESS FIX: Aggressive Dev Wrapper
+    if (basePkg.scripts && basePkg.scripts.dev) {
+        basePkg.scripts["actual-dev"] = basePkg.scripts.dev;
+        basePkg.scripts.dev = "node .spark_wrapper.js";
+    }
+
     cleanFiles["package.json"] = JSON.stringify(basePkg, null, 2);
+
+    // 🚀 INJECT THE OS-LEVEL ERROR HIJACKER (File System Bridge)
+    cleanFiles[".spark_wrapper.js"] = `
+const { spawn } = require('child_process');
+const fs = require('fs');
+
+const child = spawn('npm', ['run', 'actual-dev'], { stdio: ['ignore', 'pipe', 'pipe'] });
+let errorLog = '';
+
+const stripAnsi = (str) => str.replace(/\\x1B\\[\\d+m/g, '').replace(/\\x1b\\[[0-9;]*m/g, '');
+
+const checkError = () => {
+  const cleanLog = stripAnsi(errorLog);
+  if (cleanLog.includes('Failed to compile') || cleanLog.includes('Build Error') || cleanLog.includes('Syntax error') || cleanLog.includes('NonErrorEmittedError')) {
+     fs.writeFileSync('.spark_error.log', cleanLog);
+  }
+};
+
+child.stdout.on('data', data => {
+  process.stdout.write(data);
+  errorLog += data.toString();
+  if (errorLog.length > 10000) errorLog = errorLog.slice(-10000); // Prevent memory bloat
+  checkError();
+});
+
+child.stderr.on('data', data => {
+  process.stderr.write(data);
+  errorLog += data.toString();
+  if (errorLog.length > 10000) errorLog = errorLog.slice(-10000);
+  checkError();
+});
+
+child.on('exit', (code) => {
+  if (code !== 0) {
+     fs.writeFileSync('.spark_error.log', stripAnsi(errorLog));
+  }
+});
+`;
 
     cleanFiles[".stackblitzrc"] = JSON.stringify({
       installDependencies: true, 
@@ -1168,21 +1247,65 @@ function HomeContent() {
          }
       }
 
-      const fileRegex = /<FILE_START\s+path=["']?([^"'>]+)["']?\s*>([\s\S]*?)(?:<\/FILE_END>|$)/gi;
+      // 🚀 BULLETPROOF PARSER: Stops at </FILE_END> OR the next <FILE_START>
+      const fileRegex = /<FILE_START\s+path=["']?([^"'>]+)["']?\s*>([\s\S]*?)(?=<\/FILE_END>|<FILE_START|$)/gi;
       let match;
       let appliedChanges = 0;
 
+      // 1. Parse full file replacements or brand new files
       while ((match = fileRegex.exec(rawText)) !== null) {
         let path = match[1].trim();
         if (!path.startsWith('/')) path = '/' + path;
-        let newContent = match[2];
-        
-        newContent = newContent.replace(/^```[a-z]*\n?/mi, '').replace(/\n?```$/i, '').trim();
-        newContent = newContent.replace(/<\/?FILE_START[^>]*>/gi, '');
-        newContent = newContent.replace(/<\/?FILE_END>/gi, '');
-        newContent = newContent.trim();
-
+        let newContent = match[2].replace(/^```[a-z]*\n?/mi, '').replace(/\n?```$/i, '').trim();
+        newContent = newContent.replace(/<\/?FILE_START[^>]*>/gi, '').replace(/<\/?FILE_END>/gi, '').trim();
         mergedFiles[path] = newContent;
+        appliedChanges++;
+      }
+
+      // 2. Parse Diffs/Patches for existing files
+      const updateRegex = /<UPDATE\s+path=["']?([^"'>]+)["']?\s*>([\s\S]*?)(?:<\/UPDATE>|$)/gi;
+      const replaceRegex = /<REPLACE\s+start=["']?(\d+)["']?\s+end=["']?(\d+)["']?\s*>([\s\S]*?)<\/REPLACE>/gi;
+      
+      let updateMatch;
+      while ((updateMatch = updateRegex.exec(rawText)) !== null) {
+        let path = updateMatch[1].trim();
+        if (!path.startsWith('/')) path = '/' + path;
+        
+        const originalContent = mergedFiles[path] || "";
+        const lines = originalContent.split('\n');
+        
+        const replaceBlocks = [];
+        let replaceMatch;
+        while ((replaceMatch = replaceRegex.exec(updateMatch[2])) !== null) {
+          replaceBlocks.push({
+            start: parseInt(replaceMatch[1], 10),
+            end: parseInt(replaceMatch[2], 10),
+            content: replaceMatch[3].replace(/^```[a-z]*\n?/mi, '').replace(/\n?```$/i, '').trim()
+          });
+        }
+        
+        // Apply patches from bottom to top (reverse order) so line numbers don't shift during edits!
+        replaceBlocks.sort((a, b) => b.start - a.start).forEach(block => {
+           const startIndex = Math.max(0, block.start - 1);
+           const deleteCount = Math.max(0, block.end - block.start + 1);
+           lines.splice(startIndex, deleteCount, block.content);
+        });
+
+        mergedFiles[path] = lines.join('\n');
+        appliedChanges++;
+      }
+
+      // 🚀 3. Parse Autonomous File Deletions (Ghost File Fix)
+      const deleteRegex = /<DELETE\s+path=["']?([^"'>]+)["']?\s*\/>/gi;
+      let deleteMatch;
+      const destroyFilesQueue: string[] = [];
+      
+      while ((deleteMatch = deleteRegex.exec(rawText)) !== null) {
+        let path = deleteMatch[1].trim();
+        if (!path.startsWith('/')) path = '/' + path;
+        
+        delete mergedFiles[path]; // Remove from React state
+        destroyFilesQueue.push(path.replace(/^\//, "")); // Queue for WebContainer OS destruction
         appliedChanges++;
       }
 
@@ -1192,6 +1315,11 @@ function HomeContent() {
 
       const cleanData = isConversational ? (currentFilesState || {}) : sanitizeAndPrepareFiles(mergedFiles, activeFramework, isUpdateMode);
       if (!isConversational) setFiles(cleanData);
+
+      // (Attach destroy queue to the window so we can access it during the VM update below)
+      if (typeof window !== 'undefined') {
+        (window as Window & { _pendingDestroys?: string[] })._pendingDestroys = destroyFilesQueue;
+      }
 
       const finalMessages: Message[] = [
         ...newMessagesToSend, 
@@ -1250,9 +1378,16 @@ function HomeContent() {
             }
           });
           
-          // Only trigger the file system update if there are actual changes
-          if (Object.keys(diffFiles).length > 0) {
-            await vmRef.current.applyFsDiff({ create: diffFiles, destroy: [] });
+          // 🚀 Execute the File Deletions inside the WebContainer OS
+          const customWindow = window as Window & { _pendingDestroys?: string[] };
+          const pendingDestroys = customWindow._pendingDestroys || [];
+          
+          if (Object.keys(diffFiles).length > 0 || pendingDestroys.length > 0) {
+            await vmRef.current.applyFsDiff({ 
+              create: diffFiles, 
+              destroy: pendingDestroys 
+            });
+            customWindow._pendingDestroys = []; // Clear queue
           }
         } catch {
           setPreviewKey(prev => prev + 1); 
@@ -2312,52 +2447,61 @@ function HomeContent() {
 
                   {detectedError && (
                     <div className="absolute bottom-[calc(100%+12px)] left-0 right-0 z-50 flex justify-center animate-in slide-in-from-bottom-2 fade-in duration-300">
-                      <div className="bg-red-500/10 border border-red-500/30 shadow-[0_0_20px_rgba(239,68,68,0.2)] backdrop-blur-xl px-4 py-2.5 rounded-2xl flex items-center gap-3 max-w-[90%]">
-                        <div className="p-1.5 bg-red-500/20 rounded-lg shrink-0"><AlertTriangle className="w-4 h-4 text-red-400" /></div>
+                      <div className="bg-red-500/10 border border-red-500/30 shadow-[0_0_20px_rgba(239,68,68,0.2)] backdrop-blur-xl p-3 rounded-2xl flex flex-col gap-3 w-[92%]">
                         
-                        <div className="flex flex-col flex-1 truncate min-w-[200px]">
-                          <span className="text-sm text-red-200 font-medium truncate" title={detectedError}>{detectedError}</span>
-                          <span className="text-[10px] text-red-300/70 font-semibold uppercase tracking-wider mt-0.5">If stuck in a loop, try to restart server</span>
+                        {/* Top Row: Icon, Error Text, Close Button */}
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="flex items-center gap-2 overflow-hidden">
+                            <div className="p-1.5 bg-red-500/20 rounded-lg shrink-0">
+                              <AlertTriangle className="w-4 h-4 text-red-400" />
+                            </div>
+                            <div className="flex flex-col truncate">
+                              <span className="text-sm text-red-200 font-medium truncate" title={detectedError}>{detectedError}</span>
+                              <span className="text-[10px] text-red-300/70 font-semibold uppercase tracking-wider mt-0.5">Terminal Build Error</span>
+                            </div>
+                          </div>
+                          <button onClick={() => setDetectedError(null)} className="p-1.5 hover:bg-red-500/20 rounded-lg text-red-400 transition-colors shrink-0">
+                            <X size={14} />
+                          </button>
                         </div>
-                        
-                        <div className="w-[1px] h-8 bg-red-500/30 mx-1 shrink-0"></div>
-                        
-                        <button 
-                          onClick={() => {
-                            setDetectedError(null);
-                            handleRebootSandbox();
-                          }}
-                          className="text-xs font-bold bg-gray-800 hover:bg-gray-700 border border-gray-600 text-white px-3 py-2 rounded-xl transition-all shadow-md active:scale-95 flex items-center gap-1.5 shrink-0"
-                        >
-                          <RefreshCw size={14} /> Restart
-                        </button>
 
-                        <button 
-                          onClick={() => {
-                            const errorText = detectedError;
-                            setDetectedError(null);
-                            setInputPrompt("");
-                            
-                            const cleansedHistory = [...messages]; 
-                            if (cleansedHistory.length > 0 && cleansedHistory[cleansedHistory.length - 1].role === "assistant") {
-                              cleansedHistory.pop(); 
-                            }
+                        {/* Bottom Row: Full Width Buttons */}
+                        <div className="flex items-center gap-2 w-full">
+                          <button 
+                            onClick={() => {
+                              setDetectedError(null);
+                              handleRebootSandbox();
+                            }}
+                            className="flex-1 text-xs font-bold bg-gray-800 hover:bg-gray-700 border border-gray-600 text-white py-2.5 rounded-xl transition-all shadow-md active:scale-95 flex items-center justify-center gap-1.5"
+                          >
+                            <RefreshCw size={14} /> Restart
+                          </button>
 
-                            const aggressivePrompt = `FATAL ERROR:\n\n${errorText}\n\nSYSTEM OVERRIDE: Your previous attempt failed. DO NOT repeat the exact same code structure. Look for common mistakes (like missing imports, unclosed JSX tags, or using module.exports inside an ES module). Fix the file completely.`;
+                          <button 
+                            onClick={() => {
+                              const errorText = detectedError;
+                              setDetectedError(null);
+                              setInputPrompt("");
+                              
+                              const cleansedHistory = [...messages]; 
+                              if (cleansedHistory.length > 0 && cleansedHistory[cleansedHistory.length - 1].role === "assistant") {
+                                cleansedHistory.pop(); 
+                              }
 
-                            handleGenerate({ 
-                              overridePrompt: aggressivePrompt, 
-                              overrideMessages: cleansedHistory, 
-                              skipWarning: true 
-                            });
-                          }}
-                          className="text-xs font-bold bg-red-600 hover:bg-red-500 text-white px-3 py-2 rounded-xl transition-all shadow-md active:scale-95 flex items-center gap-1.5 shrink-0"
-                        >
-                          <Wand2 size={14} /> Auto-Fix
-                        </button>
-                        <button onClick={() => setDetectedError(null)} className="p-1.5 hover:bg-red-500/20 rounded-lg text-red-400 transition-colors shrink-0">
-                          <X size={14} />
-                        </button>
+                              const aggressivePrompt = `FATAL ERROR:\n\n${errorText}\n\nSYSTEM OVERRIDE: Your previous attempt failed. DO NOT repeat the exact code.\n\nCRITICAL INSTRUCTION: If this is a Syntax Error or "Module not found", DO NOT use <UPDATE> patches. Your previous file is corrupted. You MUST completely rewrite the broken file using <FILE_START path="/path">...</FILE_END> to guarantee a clean slate. Ensure all imports are present.`;
+
+                              handleGenerate({ 
+                                overridePrompt: aggressivePrompt, 
+                                overrideMessages: cleansedHistory, 
+                                skipWarning: true 
+                              });
+                            }}
+                            className="flex-[2] text-xs font-bold bg-red-600 hover:bg-red-500 text-white py-2.5 rounded-xl transition-all shadow-[0_0_15px_rgba(239,68,68,0.3)] active:scale-95 flex items-center justify-center gap-1.5"
+                          >
+                            <Wand2 size={14} /> Auto-Fix Issue
+                          </button>
+                        </div>
+
                       </div>
                     </div>
                   )}
