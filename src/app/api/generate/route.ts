@@ -360,7 +360,17 @@ RULES:
         { "scope": "conversation" | "frontend_only" | "backend_only" | "fullstack", "filesToModify": ["/path1"], "plan": "1-sentence strategy" }`;
         
         const planResponse = await architectModel.generateContent(architectPrompt);
-        const plan = JSON.parse(planResponse.response.text());
+        // 🚀 FIX: Bulletproof JSON parsing. If the AI rebels and outputs raw text, default to fullstack.
+        let plan = { scope: "fullstack", filesToModify: [], plan: "Fallback to fullstack due to parsing error." };
+        try {
+          const rawPlanText = planResponse.response.text();
+          const cleanPlanText = rawPlanText.replace(/```json/gi, '').replace(/```/g, '').trim();
+          const parsedPlan = JSON.parse(cleanPlanText);
+          if (parsedPlan && parsedPlan.scope) plan = parsedPlan;
+        } catch (parseError) {
+          console.warn("[ROUTER] AI failed to return JSON. Defaulting to fullstack.", parseError);
+        }
+        
         if (!isUpdateMode && plan.scope !== "conversation") plan.scope = "fullstack";
 
         const mainModel = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
@@ -446,14 +456,20 @@ RULES:
 
       } catch (e: unknown) {
         lastErrorDetails = e instanceof Error ? e.message : String(e);
-        if (lastErrorDetails.includes("429") || lastErrorDetails.includes("Quota")) continue;
-        continue;
+        
+        // 🚀 THE KEY-LOOP FALLBACK FIX: Only switch to a backup key if the current one is OUT of quota. 
+        if (lastErrorDetails.includes("429") || lastErrorDetails.includes("Quota")) {
+            continue; 
+        } else {
+            break; 
+        }
       }
     }
 
+    // 🚀 FIX: Unmask the actual Google API error so the frontend can catch rate limits!
     if (!streamResult) {
       return NextResponse.json(
-        { error: "The Multi-Agent Pipeline failed to generate a response. Please check your API key and project plan." }, 
+        { error: lastErrorDetails ? `API Error: ${lastErrorDetails}` : "The Multi-Agent Pipeline failed. Please check your API keys." }, 
         { status: 500 }
       );
     }

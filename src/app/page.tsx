@@ -204,8 +204,10 @@ function HomeContent() {
     return () => window.removeEventListener('message', handleMessage);
   }, []);
 
-  // 🚀 WEBCONTAINER FILE SYSTEM POLLER (Catches Terminal Errors)
+  // 🚀 WEBCONTAINER FILE SYSTEM POLLER (Catches Terminal Errors & Auto-Installs)
   useEffect(() => {
+    let lastInstallTime = 0; // 🚀 FIX: Local cooldown timer
+
     const interval = setInterval(async () => {
       if (!vmRef.current) return;
       try {
@@ -213,15 +215,66 @@ function HomeContent() {
         if (fsSnapshot && fsSnapshot['.spark_error.log']) {
           const errContent = fsSnapshot['.spark_error.log'];
           if (errContent) {
+            
+            // 🚀 FIX: If we recently triggered an install, give NPM 15 seconds to finish before panicking!
+            if (Date.now() - lastInstallTime < 15000) {
+               return; // Wait patiently in the background
+            }
+
+            // 🚀 1. AUTO-DEPENDENCY RESOLUTION (Zero-Click Fix)
+            let missingPackage = null;
+            const webpackMatch = errContent.match(/Module not found: Can't resolve '([^']+)'/i);
+            const viteMatch = errContent.match(/Failed to resolve import "([^"]+)"/i);
+            const nodeMatch = errContent.match(/Cannot find module '([^']+)'/i);
+            const pkgMatch = errContent.match(/Cannot find package '([^']+)'/i);
+            
+            if (webpackMatch) missingPackage = webpackMatch[1].split('/')[0];
+            else if (viteMatch) missingPackage = viteMatch[1].split('/')[0];
+            else if (nodeMatch) missingPackage = nodeMatch[1].split('/')[0];
+            else if (pkgMatch) missingPackage = pkgMatch[1].split('/')[0];
+
+            if (missingPackage && !missingPackage.startsWith('.') && !missingPackage.startsWith('/')) {
+               console.log(`[AUTO-FIX] Missing dependency detected: ${missingPackage}. Installing silently...`);
+               
+               const currentPkgStr = filesRef.current?.['/package.json'] || filesRef.current?.['package.json'];
+               if (currentPkgStr) {
+                  try {
+                     const pkg = JSON.parse(currentPkgStr);
+                     pkg.dependencies = pkg.dependencies || {};
+                     
+                     if (!pkg.dependencies[missingPackage]) {
+                        pkg.dependencies[missingPackage] = "latest"; 
+                        const newPkgStr = JSON.stringify(pkg, null, 2);
+                        
+                        // 1. Update React State
+                        setFiles(prev => prev ? { ...prev, '/package.json': newPkgStr } : null);
+                        
+                        // 2. Start the 15-second Cooldown!
+                        lastInstallTime = Date.now();
+                        
+                        // 3. Update OS (Triggers npm install)
+                        await vmRef.current.applyFsDiff({ 
+                           create: { 'package.json': newPkgStr }, 
+                           destroy: ['.spark_error.log'] 
+                        });
+                        
+                        return;
+                     }
+                  } catch (e) {
+                     console.warn("Failed to parse package.json for auto-fix", e);
+                  }
+               }
+            }
+
+            // 🚀 2. FALLBACK: If not an import error, or 15s have passed and it's still broken
             setDetectedError("TERMINAL COMPILATION ERROR:\n" + errContent);
-            // Delete the log immediately so we don't trigger an infinite loop
             await vmRef.current.applyFsDiff({ create: {}, destroy: ['.spark_error.log'] });
           }
         }
       } catch (e) {
         // Silently ignore SDK sync errors
       }
-    }, 1500); // Check every 1.5 seconds
+    }, 1500); 
 
     return () => clearInterval(interval);
   }, []);
@@ -545,7 +598,8 @@ const stripAnsi = (str) => str.replace(/\\x1B\\[\\d+m/g, '').replace(/\\x1b\\[[0
 
 const checkError = () => {
   const cleanLog = stripAnsi(errorLog);
-  if (cleanLog.includes('Failed to compile') || cleanLog.includes('Build Error') || cleanLog.includes('Syntax error') || cleanLog.includes('NonErrorEmittedError')) {
+  // 🚀 Added "Module not found" and "Cannot find" to trigger the auto-installer
+  if (cleanLog.includes('Failed to compile') || cleanLog.includes('Build Error') || cleanLog.includes('Syntax error') || cleanLog.includes('NonErrorEmittedError') || cleanLog.includes('Module not found') || cleanLog.includes('Cannot find')) {
      fs.writeFileSync('.spark_error.log', cleanLog);
   }
 };
