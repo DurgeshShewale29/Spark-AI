@@ -7,9 +7,108 @@ import {
   type GenerateContentStreamResult,
   type EnhancedGenerateContentResponse
 } from "@google/generative-ai";
+import OpenAI from "openai";
+import Anthropic from "@anthropic-ai/sdk";
 import { NextResponse } from "next/server";
 import { connectToDB } from "@/lib/db";
 import GlobalRule from "@/models/GlobalRule";
+
+class UniversalAIWrapper {
+  private key: string;
+  private provider: 'gemini' | 'openai' | 'anthropic' | 'groq';
+
+  constructor(key: string) {
+    this.key = key ? key.trim() : "";
+    if (this.key.startsWith('AIza')) this.provider = 'gemini';
+    else if (this.key.startsWith('gsk_')) this.provider = 'groq';
+    else if (this.key.startsWith('sk-ant-')) this.provider = 'anthropic';
+    else if (this.key.startsWith('sk-')) this.provider = 'openai';
+    else this.provider = 'gemini'; // fallback
+  }
+
+  getGenerativeModel(options: { model: string, generationConfig?: any }) {
+    if (this.provider === 'gemini') {
+      const genAI = new GoogleGenerativeAI(this.key);
+      return genAI.getGenerativeModel(options);
+    }
+    
+    return {
+      generateContent: async (promptParts: any) => {
+        let text = Array.isArray(promptParts) 
+          ? promptParts.map((p: any) => (typeof p === 'string' ? p : p?.inlineData ? '[Image omitted for non-Gemini provider]' : '')).join('\n') 
+          : String(promptParts);
+
+        if (this.provider === 'anthropic') {
+          const anthropic = new Anthropic({ apiKey: this.key });
+          const res = await anthropic.messages.create({
+            model: "claude-3-5-sonnet-latest",
+            max_tokens: 8192,
+            messages: [{ role: "user", content: text }]
+          });
+          const msg = res.content.find((c: any) => c.type === 'text');
+          return { response: { text: () => msg ? (msg as any).text : "" } };
+        } else {
+          const isGroq = this.provider === 'groq';
+          const openai = new OpenAI({ 
+            apiKey: this.key, 
+            baseURL: isGroq ? 'https://api.groq.com/openai/v1' : undefined 
+          });
+          const res = await openai.chat.completions.create({
+            model: isGroq ? "llama-3.3-70b-versatile" : "gpt-4o",
+            messages: [{ role: "user", content: text }],
+            response_format: options.generationConfig?.responseMimeType === "application/json" ? { type: "json_object" } : undefined
+          });
+          return { response: { text: () => res.choices[0].message.content || "" } };
+        }
+      },
+      generateContentStream: async (promptParts: any) => {
+        let text = Array.isArray(promptParts) 
+          ? promptParts.map((p: any) => (typeof p === 'string' ? p : p?.inlineData ? '[Image omitted for non-Gemini provider]' : '')).join('\n') 
+          : String(promptParts);
+
+        if (this.provider === 'anthropic') {
+          const anthropic = new Anthropic({ apiKey: this.key });
+          const stream = await anthropic.messages.create({
+            model: "claude-3-5-sonnet-latest",
+            max_tokens: 8192,
+            messages: [{ role: "user", content: text }],
+            stream: true
+          });
+
+          async function* generate() {
+            for await (const chunk of stream) {
+              if (chunk.type === 'content_block_delta' && chunk.delta.type === 'text_delta') {
+                yield { text: () => (chunk.delta as any).text };
+              }
+            }
+          }
+          return { stream: generate() };
+        } else {
+          const isGroq = this.provider === 'groq';
+          const openai = new OpenAI({ 
+            apiKey: this.key, 
+            baseURL: isGroq ? 'https://api.groq.com/openai/v1' : undefined 
+          });
+          const stream = await openai.chat.completions.create({
+            model: isGroq ? "llama-3.3-70b-versatile" : "gpt-4o",
+            messages: [{ role: "user", content: text }],
+            stream: true
+          });
+
+          async function* generate() {
+            for await (const chunk of stream) {
+              const content = chunk.choices[0]?.delta?.content || "";
+              if (content) {
+                yield { text: () => content };
+              }
+            }
+          }
+          return { stream: generate() };
+        }
+      }
+    };
+  }
+}
 
 export const maxDuration = 60;
 
@@ -19,6 +118,10 @@ const MODEL_FALLBACK_LIST = [
 
 // 🚀 Background task with AI Validator (Self-Pruning & Scoping)
 async function processAutoLearning(fullText: string, apiKey: string, userPrompt: string) {
+  if (!apiKey.startsWith("AIza")) {
+      console.log("[HIVE MIND] Skipping Auto-Learning because a non-Gemini key was used (requires Gemini embeddings).");
+      return;
+  }
   const ruleRegex = /<NEW_RULE>([\s\S]*?)<\/NEW_RULE>/;
   const match = fullText.match(ruleRegex);
   
@@ -103,8 +206,11 @@ export async function POST(req: Request) {
     if (process.env.GEMINI_API_KEY) availableKeys.push(process.env.GEMINI_API_KEY);
     
     for (let i = 1; i <= 20; i++) {
-      const alt = process.env[`GEMINI_API_KEY_ALT_${i}`];
-      if (alt) availableKeys.push(alt);
+      const geminiAlt = process.env[`GEMINI_API_KEY_ALT_${i}`];
+      if (geminiAlt) availableKeys.push(geminiAlt);
+      
+      const genericAlt = process.env[`API_KEY_ALT_${i}`];
+      if (genericAlt) availableKeys.push(genericAlt);
     }
     
     availableKeys = availableKeys.sort(() => Math.random() - 0.5);
@@ -128,25 +234,32 @@ export async function POST(req: Request) {
       const projectRules = await GlobalRule.find({ ruleType: "project-directive", isActive: true, isDeleted: false });
       
       // 2. Fetch Contextual Auto-Learned Rules (Vector Search)
-      const embedGenAI = new GoogleGenerativeAI(API_KEYS[0]!);
-      const embedModel = embedGenAI.getGenerativeModel({ model: "gemini-embedding-001" });
-      const embedResult = await embedModel.embedContent(latestUserMessage);
-      const promptEmbedding = embedResult.embedding.values;
+      let learnedRules: any[] = [];
+      const geminiKeyForEmbeddings = API_KEYS.find(k => k.startsWith("AIza"));
+      
+      if (geminiKeyForEmbeddings) {
+        const embedGenAI = new GoogleGenerativeAI(geminiKeyForEmbeddings);
+        const embedModel = embedGenAI.getGenerativeModel({ model: "gemini-embedding-001" });
+        const embedResult = await embedModel.embedContent(latestUserMessage);
+        const promptEmbedding = embedResult.embedding.values;
 
-      const learnedRules = await GlobalRule.aggregate([
-        {
-          $vectorSearch: {
-            index: "vector_index",
-            path: "embedding",
-            queryVector: promptEmbedding,
-            numCandidates: 15,
-            limit: 4
+        learnedRules = await GlobalRule.aggregate([
+          {
+            $vectorSearch: {
+              index: "vector_index",
+              path: "embedding",
+              queryVector: promptEmbedding,
+              numCandidates: 15,
+              limit: 4
+            }
+          },
+          {
+            $match: { isActive: true, isDeleted: false, ruleType: "auto-learned" } 
           }
-        },
-        {
-          $match: { isActive: true, isDeleted: false, ruleType: "auto-learned" } 
-        }
-      ]);
+        ]);
+      } else {
+        console.warn("[API] No Gemini key available for embeddings. Skipping contextual auto-learned rules.");
+      }
 
       if (projectRules.length > 0 || learnedRules.length > 0) {
         globalRulesText = `\n\n🧠 HIVE MIND KNOWLEDGE BASE (CRITICAL RELEVANT CONTEXT):
@@ -330,17 +443,17 @@ RULES:
 3. THE <UPDATE> FALLBACK: ONLY use <UPDATE path="/path"> with <REPLACE start="X" end="Y"> if the file is MASSIVE (300+ lines).
 4. ORPHANED FILE DELETION (CRITICAL): If you rename a file, refactor a component out of existence, or a file is no longer needed, you MUST delete it to prevent compiler crashes. Use exactly: <DELETE path="/path/to/old/file.ts" />
 5. AUTO-LEARNING: If fixing an error, output: <NEW_RULE>When doing X, ensure Y to prevent Z.</NEW_RULE>`
-      : `${systemPromptBase}\n\nCREATE MODE: Empty workspace.\n\nCONVERSATION:\n${conversationTranscript}\n\nINSTRUCTION:\n1. If the user describes an app, output a markdown message followed by files using <FILE_START> tags.`;
+      : `${systemPromptBase}\n\nCREATE MODE: Empty workspace.\n\nCONVERSATION:\n${conversationTranscript}\n\nINSTRUCTION:\n1. You MUST generate a complete full-stack application for the user.\n2. For EVERY single file you generate, you MUST output it using this exact XML format:\n<FILE_START path="/path/to/file">\n[content]\n</FILE_END>\n3. DO NOT use standard markdown code blocks to output project files.`;
 
     // 🚀 4. THE MULTI-AGENT PIPELINE (With Intelligent Router)
-    let streamResult: GenerateContentStreamResult | null = null;
+    let streamResult: any = null;
     let successfulKey: string | null = null;
     let firstChunk: EnhancedGenerateContentResponse | null = null;
     let lastErrorDetails = "";
 
     keyLoop: for (let keyIndex = 0; keyIndex < Math.min(API_KEYS.length, 10); keyIndex++) {
       const currentKey = API_KEYS[keyIndex];
-      const genAI = new GoogleGenerativeAI(currentKey!);
+      const genAI = new UniversalAIWrapper(currentKey!);
 
       try {
         // 🚀 AGENT 1: THE INTELLIGENT ROUTER (Scope & Intent Detection)
@@ -350,7 +463,9 @@ RULES:
         Is Update Mode: ${isUpdateMode}
         
         Determine the Scope of Work. 
-        CRITICAL: Distinguish between coding tasks and conversational questions.
+        CRITICAL RULES:
+        1. If Is Update Mode is false, you MUST return "fullstack".
+        2. Distinguish between coding tasks and conversational questions.
         - "conversation": The user is asking a question, asking for advice/suggestions, or chatting. NO code changes requested.
         - "frontend_only": User explicitly wants to change UI, CSS, React components.
         - "backend_only": User explicitly wants to change API routes, db.ts, types.
@@ -360,8 +475,19 @@ RULES:
         { "scope": "conversation" | "frontend_only" | "backend_only" | "fullstack", "filesToModify": ["/path1"], "plan": "1-sentence strategy" }`;
         
         const planResponse = await architectModel.generateContent(architectPrompt);
-        const plan = JSON.parse(planResponse.response.text());
-        if (!isUpdateMode && plan.scope !== "conversation") plan.scope = "fullstack";
+        // 🚀 FIX: Bulletproof JSON parsing. If the AI rebels and outputs raw text, default to fullstack.
+        let plan = { scope: "fullstack", filesToModify: [], plan: "Fallback to fullstack due to parsing error." };
+        try {
+          const rawPlanText = planResponse.response.text();
+          const cleanPlanText = rawPlanText.replace(/```json/gi, '').replace(/```/g, '').trim();
+          const parsedPlan = JSON.parse(cleanPlanText);
+          if (parsedPlan && parsedPlan.scope) plan = parsedPlan;
+        } catch (parseError) {
+          console.warn("[ROUTER] AI failed to return JSON. Defaulting to fullstack.", parseError);
+        }
+        
+        // 🚀 FORCED OVERRIDE: If it's a new project, NEVER allow conversation mode.
+        if (!isUpdateMode) plan.scope = "fullstack";
 
         const mainModel = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
 
@@ -429,10 +555,15 @@ RULES:
         ${newlyGeneratedCode}
         
         YOUR DIRECTIVE:
-        1. Fix duplicate variables, missing brackets, and stray returns.
-        2. Ensure valid XML blocks: <FILE_START path="...">, <UPDATE path="...">, or <DELETE path="..." />.
-        3. UX & EDUCATION (CRITICAL): Before outputting the XML, you MUST write a brief, friendly explanation of exactly what you changed or built.
-        4. PROMPT SUGGESTIONS: After the explanation, provide 2-3 advanced "Pro Prompts" formatted as bullet points that the user can copy/paste to improve the app further (e.g., "Add optimistic updates for a faster UI", "Implement a drag-and-drop feature").
+        1. Fix any duplicate variables, missing brackets, or syntax errors.
+        2. CRITICAL XML ENFORCEMENT: You MUST wrap EVERY SINGLE FILE in exact XML tags. 
+           Example:
+           <FILE_START path="/src/App.jsx">
+           // code here
+           </FILE_END>
+           DO NOT use standard markdown code blocks (like \`\`\`javascript). You MUST use <FILE_START path="..."> instead!
+        3. UX & EDUCATION (CRITICAL): Before outputting the XML, write a brief, friendly explanation of what you built.
+        4. PROMPT SUGGESTIONS: Provide 2-3 advanced "Pro Prompts" as bullet points.
         5. Output the explanation and suggestions FIRST, then output the XML blocks.`;
 
         streamResult = await mainModel.generateContentStream(reviewerPrompt);
@@ -446,14 +577,22 @@ RULES:
 
       } catch (e: unknown) {
         lastErrorDetails = e instanceof Error ? e.message : String(e);
-        if (lastErrorDetails.includes("429") || lastErrorDetails.includes("Quota")) continue;
-        continue;
+        
+        // 🚀 THE KEY-LOOP FALLBACK FIX: Switch to a backup key if the current one is OUT of quota, INVALID, or UNAVAILABLE. 
+        if (lastErrorDetails.includes("429") || lastErrorDetails.includes("Quota") || lastErrorDetails.includes("API key not valid") || lastErrorDetails.includes("400") || lastErrorDetails.includes("401") || lastErrorDetails.includes("503") || lastErrorDetails.includes("500") || lastErrorDetails.includes("502")) {
+            console.warn(`[API] Key failed with error: ${lastErrorDetails}. Trying next backup key...`);
+            continue; 
+        } else {
+            console.warn(`[API] Fatal error or unhandled status: ${lastErrorDetails}. Aborting pipeline.`);
+            break; 
+        }
       }
     }
 
+    // 🚀 FIX: Unmask the actual Google API error so the frontend can catch rate limits!
     if (!streamResult) {
       return NextResponse.json(
-        { error: "The Multi-Agent Pipeline failed to generate a response. Please check your API key and project plan." }, 
+        { error: lastErrorDetails ? `API Error: ${lastErrorDetails}` : "The Multi-Agent Pipeline failed. Please check your API keys." }, 
         { status: 500 }
       );
     }
