@@ -112,7 +112,6 @@ class UniversalAIWrapper {
   }
 }
 
-export const maxDuration = 60;
 
 const MODEL_FALLBACK_LIST = [
   "gemini-2.5-flash" 
