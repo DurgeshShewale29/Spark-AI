@@ -7,12 +7,16 @@ import { useRouter } from "next/navigation";
 import {
   Loader2, Wand2, Box, Zap,
   RefreshCw, Maximize, Minimize, Settings, X, History, MoreVertical,
-  Edit2, Pin, Trash2, Check, ChevronLeft, Plus, Upload, Send, Bot, ChevronDown, FileArchive, AlertTriangle, Github, Mic, Image as ImageIcon, FileCode2, Square, RotateCcw, LayoutTemplate,
-  Share2, Copy, CheckCheck, Inbox, ShieldAlert
+  Edit2, Pin, Trash2, Check, ChevronLeft, ChevronUp, Plus, Upload, Send, Bot, ChevronDown, FileArchive, AlertTriangle, Github, Mic, Image as ImageIcon, FileCode2, Square, RotateCcw, LayoutTemplate,
+  Share2, Copy, CheckCheck, Inbox, ShieldAlert, Terminal as TerminalIcon
 } from "lucide-react";
 import { useAuth, SignInButton, SignUpButton, UserButton, useUser } from "@clerk/nextjs";
 import type Pusher from "pusher-js";
 import type { Channel } from "pusher-js";
+
+import 'xterm/css/xterm.css';
+import type { Terminal } from 'xterm';
+import type { FitAddon } from 'xterm-addon-fit';
 
 interface ISpeechRecognitionEvent {
   resultIndex: number;
@@ -171,6 +175,63 @@ function HomeContent() {
   const [mismatchData, setMismatchData] = useState<{ target: string, prompt: string } | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<{ type: 'single' | 'all', id?: string } | null>(null);
   const [detectedError, setDetectedError] = useState<string | null>(null);
+  const [isTerminalOpen, setIsTerminalOpen] = useState(true);
+  const [terminalHeight, setTerminalHeight] = useState(256);
+
+  const terminalRef = useRef<Terminal | null>(null);
+  const fitAddonRef = useRef<FitAddon | null>(null);
+  const terminalContainerRef = useRef<HTMLDivElement>(null);
+  const lastStdoutLenRef = useRef<number>(0);
+
+  useEffect(() => {
+    let term: Terminal;
+    let fitAddon: FitAddon;
+
+    const initTerminal = async () => {
+      if (terminalContainerRef.current && !terminalRef.current) {
+        // We statically imported the types, but we dynamically import the classes
+        const { Terminal } = await import('xterm');
+        const { FitAddon } = await import('xterm-addon-fit');
+
+        term = new Terminal({
+          theme: {
+            background: '#0B0D11',
+            foreground: '#e5e7eb',
+            cursor: '#3b82f6',
+            black: '#000000',
+            red: '#ef4444',
+            green: '#22c55e',
+            yellow: '#eab308',
+            blue: '#3b82f6',
+            magenta: '#d946ef',
+            cyan: '#06b6d4',
+            white: '#ffffff',
+          },
+          fontFamily: 'Menlo, Monaco, "Courier New", monospace',
+          fontSize: 12,
+          cursorBlink: true,
+          disableStdin: true,
+          convertEol: true
+        });
+
+        fitAddon = new FitAddon();
+        term.loadAddon(fitAddon);
+        
+        term.open(terminalContainerRef.current);
+        fitAddon.fit();
+        
+        term.writeln('\\x1b[38;2;59;130;246m[Spark AI]\\x1b[0m Terminal initialized. Waiting for container...');
+
+        terminalRef.current = term;
+        fitAddonRef.current = fitAddon;
+
+        const resizeObserver = new ResizeObserver(() => fitAddon.fit());
+        resizeObserver.observe(terminalContainerRef.current);
+      }
+    };
+
+    initTerminal();
+  }, []);
 
   const activeChat = history.find(h => h.id === currentChatId);
   const userEmail = user?.emailAddresses[0]?.emailAddress?.toLowerCase();
@@ -212,6 +273,22 @@ function HomeContent() {
       if (!vmRef.current) return;
       try {
         const fsSnapshot = await vmRef.current.getFsSnapshot();
+        
+        // 🚀 PIPING STDOUT TO XTERM
+        if (fsSnapshot && fsSnapshot['.spark_stdout.log'] && terminalRef.current) {
+          const outContent = fsSnapshot['.spark_stdout.log'];
+          const lastLen = lastStdoutLenRef.current;
+          
+          if (outContent.length > lastLen) {
+            terminalRef.current.write(outContent.slice(lastLen));
+            lastStdoutLenRef.current = outContent.length;
+          } else if (outContent.length < lastLen) {
+            terminalRef.current.clear();
+            terminalRef.current.write(outContent);
+            lastStdoutLenRef.current = outContent.length;
+          }
+        }
+
         if (fsSnapshot && fsSnapshot['.spark_error.log']) {
           const errContent = fsSnapshot['.spark_error.log'];
           if (errContent) {
@@ -591,8 +668,13 @@ function HomeContent() {
 const { spawn } = require('child_process');
 const fs = require('fs');
 
-const child = spawn('npm', ['run', 'actual-dev'], { stdio: ['ignore', 'pipe', 'pipe'] });
+const child = spawn('npm', ['run', 'actual-dev'], { 
+  stdio: ['ignore', 'pipe', 'pipe'],
+  env: { ...process.env, FORCE_COLOR: '1' } 
+});
+
 let errorLog = '';
+let stdoutBuffer = '';
 
 const stripAnsi = (str) => str.replace(/\\x1B\\[\\d+m/g, '').replace(/\\x1b\\[[0-9;]*m/g, '');
 
@@ -604,17 +686,27 @@ const checkError = () => {
   }
 };
 
+const appendStdout = (data) => {
+  stdoutBuffer += data;
+  if (stdoutBuffer.length > 250000) stdoutBuffer = stdoutBuffer.slice(-250000); // 250kb max
+  try { fs.writeFileSync('.spark_stdout.log', stdoutBuffer); } catch (e) {}
+};
+
 child.stdout.on('data', data => {
   process.stdout.write(data);
-  errorLog += data.toString();
+  const strData = data.toString();
+  errorLog += strData;
   if (errorLog.length > 10000) errorLog = errorLog.slice(-10000); // Prevent memory bloat
+  appendStdout(strData);
   checkError();
 });
 
 child.stderr.on('data', data => {
   process.stderr.write(data);
-  errorLog += data.toString();
+  const strData = data.toString();
+  errorLog += strData;
   if (errorLog.length > 10000) errorLog = errorLog.slice(-10000);
+  appendStdout(strData);
   checkError();
 });
 
@@ -2497,67 +2589,6 @@ child.on('exit', (code) => {
 
                 <div className="relative w-full">
 
-                  {detectedError && (
-                    <div className="absolute bottom-[calc(100%+12px)] left-0 right-0 z-50 flex justify-center animate-in slide-in-from-bottom-2 fade-in duration-300">
-                      <div className="bg-red-500/10 border border-red-500/30 shadow-[0_0_20px_rgba(239,68,68,0.2)] backdrop-blur-xl p-3 rounded-2xl flex flex-col gap-3 w-[92%]">
-
-                        {/* Top Row: Icon, Error Text, Close Button */}
-                        <div className="flex items-start justify-between gap-2">
-                          <div className="flex items-center gap-2 overflow-hidden">
-                            <div className="p-1.5 bg-red-500/20 rounded-lg shrink-0">
-                              <AlertTriangle className="w-4 h-4 text-red-400" />
-                            </div>
-                            <div className="flex flex-col truncate">
-                              <span className="text-sm text-red-200 font-medium truncate" title={detectedError}>{detectedError}</span>
-                              <span className="text-[10px] text-red-300/70 font-semibold uppercase tracking-wider mt-0.5">Terminal Build Error</span>
-                            </div>
-                          </div>
-                          <button onClick={() => setDetectedError(null)} className="p-1.5 hover:bg-red-500/20 rounded-lg text-red-400 transition-colors shrink-0">
-                            <X size={14} />
-                          </button>
-                        </div>
-
-                        {/* Bottom Row: Full Width Buttons */}
-                        <div className="flex items-center gap-2 w-full">
-                          <button
-                            onClick={() => {
-                              setDetectedError(null);
-                              handleRebootSandbox();
-                            }}
-                            className="flex-1 text-xs font-bold bg-gray-800 hover:bg-gray-700 border border-gray-600 text-white py-2.5 rounded-xl transition-all shadow-md active:scale-95 flex items-center justify-center gap-1.5"
-                          >
-                            <RefreshCw size={14} /> Restart
-                          </button>
-
-                          <button
-                            onClick={() => {
-                              const errorText = detectedError;
-                              setDetectedError(null);
-                              setInputPrompt("");
-
-                              const cleansedHistory = [...messages];
-                              if (cleansedHistory.length > 0 && cleansedHistory[cleansedHistory.length - 1].role === "assistant") {
-                                cleansedHistory.pop();
-                              }
-
-                              const aggressivePrompt = `FATAL ERROR:\n\n${errorText}\n\nSYSTEM OVERRIDE: Your previous attempt failed. DO NOT repeat the exact code.\n\nCRITICAL INSTRUCTION: If this is a Syntax Error or "Module not found", DO NOT use <UPDATE> patches. Your previous file is corrupted. You MUST completely rewrite the broken file using <FILE_START path="/path">...</FILE_END> to guarantee a clean slate. Ensure all imports are present.`;
-
-                              handleGenerate({
-                                overridePrompt: aggressivePrompt,
-                                overrideMessages: cleansedHistory,
-                                skipWarning: true
-                              });
-                            }}
-                            className="flex-[2] text-xs font-bold bg-red-600 hover:bg-red-500 text-white py-2.5 rounded-xl transition-all shadow-[0_0_15px_rgba(239,68,68,0.3)] active:scale-95 flex items-center justify-center gap-1.5"
-                          >
-                            <Wand2 size={14} /> Auto-Fix Issue
-                          </button>
-                        </div>
-
-                      </div>
-                    </div>
-                  )}
-
                   {mentionOpen && filteredFiles.length > 0 && (
                     <div className="absolute bottom-full mb-3 left-4 w-[85%] max-h-56 overflow-y-auto bg-[#1A1D24] border border-gray-700 rounded-xl shadow-2xl z-[100] flex flex-col py-1.5 custom-scrollbar animate-in slide-in-from-bottom-2 fade-in duration-200">
                       {filteredFiles.map((file, idx) => (
@@ -2815,9 +2846,87 @@ child.on('exit', (code) => {
               </div>
             </div>
 
-            <div className="flex-1 w-full h-full flex overflow-hidden relative animate-in fade-in duration-700">
-              <div className="w-full h-full bg-[#1e1e1e]" key={previewKey}>
+            <div className="flex-1 w-full h-full flex flex-col overflow-hidden relative animate-in fade-in duration-700">
+              <div className="flex-1 w-full min-h-0 bg-[#1e1e1e]" key={previewKey}>
                 <div id={`stackblitz-${previewKey}`} className="w-full h-full" />
+              </div>
+              
+              {/* Terminal Panel */}
+              <div 
+                style={{ height: isTerminalOpen ? terminalHeight : 37 }} 
+                className="border-t border-gray-800 bg-[#0B0D11] flex flex-col relative shrink-0"
+              >
+                {isTerminalOpen && (
+                  <div 
+                    className="absolute top-0 left-0 right-0 h-1.5 cursor-row-resize z-50 hover:bg-blue-500/50"
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      const startY = e.clientY;
+                      const startHeight = terminalHeight;
+                      
+                      const handleMouseMove = (moveEvent: MouseEvent) => {
+                        const deltaY = startY - moveEvent.clientY;
+                        setTerminalHeight(Math.max(100, Math.min(window.innerHeight - 150, startHeight + deltaY)));
+                      };
+                      
+                      const handleMouseUp = () => {
+                        document.removeEventListener('mousemove', handleMouseMove);
+                        document.removeEventListener('mouseup', handleMouseUp);
+                        // Fit terminal to new size
+                        setTimeout(() => fitAddonRef.current?.fit(), 50);
+                      };
+                      
+                      document.addEventListener('mousemove', handleMouseMove);
+                      document.addEventListener('mouseup', handleMouseUp);
+                    }}
+                  />
+                )}
+                <div className="flex items-center justify-between px-4 py-2 border-b border-gray-800/60 bg-[#0a0a0a]">
+                  <div className="flex items-center gap-2 text-xs font-semibold text-gray-400">
+                    <TerminalIcon className="w-3.5 h-3.5" /> Terminal
+                  </div>
+                  <button 
+                    onClick={() => {
+                      setIsTerminalOpen(!isTerminalOpen);
+                      setTimeout(() => fitAddonRef.current?.fit(), 100);
+                    }}
+                    className="text-gray-400 hover:text-white transition-colors hover:bg-gray-800 rounded p-0.5"
+                  >
+                    {isTerminalOpen ? <ChevronDown className="w-4 h-4" /> : <ChevronUp className="w-4 h-4" />}
+                  </button>
+                </div>
+                <div className={`flex-1 overflow-hidden relative ${!isTerminalOpen ? 'hidden' : ''}`}>
+                  <div ref={terminalContainerRef} className="w-full h-full p-2" />
+                  
+                  {/* Floating Cursor-Style Auto-Fix */}
+                  {detectedError && (
+                    <div className="absolute top-4 right-6 z-50 animate-in slide-in-from-right-4 fade-in">
+                      <button
+                        onClick={() => {
+                          const errorText = detectedError;
+                          setDetectedError(null);
+                          setInputPrompt("");
+
+                          const cleansedHistory = [...messages];
+                          if (cleansedHistory.length > 0 && cleansedHistory[cleansedHistory.length - 1].role === "assistant") {
+                            cleansedHistory.pop();
+                          }
+
+                          const aggressivePrompt = `FATAL ERROR:\n\n${errorText}\n\nSYSTEM OVERRIDE: Your previous attempt failed. DO NOT repeat the exact code.\n\nCRITICAL INSTRUCTION: If this is a Syntax Error or "Module not found", DO NOT use <UPDATE> patches. Your previous file is corrupted. You MUST completely rewrite the broken file using <FILE_START path="/path">...</FILE_END> to guarantee a clean slate. Ensure all imports are present.`;
+
+                          handleGenerate({
+                            overridePrompt: aggressivePrompt,
+                            overrideMessages: cleansedHistory,
+                            skipWarning: true
+                          });
+                        }}
+                        className="flex items-center gap-2 bg-blue-600 hover:bg-blue-500 text-white px-3 py-1.5 rounded-lg text-xs font-bold shadow-lg transition-all active:scale-95 border border-blue-400/30"
+                      >
+                        <Wand2 className="w-3.5 h-3.5" /> Fix in Chat
+                      </button>
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
           </>
