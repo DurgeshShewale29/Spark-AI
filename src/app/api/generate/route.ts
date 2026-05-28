@@ -13,7 +13,7 @@ import { NextResponse } from "next/server";
 import { connectToDB } from "@/lib/db";
 import GlobalRule from "@/models/GlobalRule";
 
-export const maxDuration = 60; // 60 seconds (max for Vercel Hobby tier)
+export const maxDuration = 300; // 300 seconds (max for Vercel Pro tier)
 
 class UniversalAIWrapper {
   private key: string;
