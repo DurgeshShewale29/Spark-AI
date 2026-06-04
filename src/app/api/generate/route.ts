@@ -198,6 +198,7 @@ async function processAutoLearning(fullText: string, apiKey: string, userPrompt:
   }
 }
 export async function POST(req: Request) {
+  console.log("====== API GENERATE HIT ======");
   try {
     const { messages, currentFiles, attachedImages, customApiKey, framework = "nextjs", taggedFiles = [] } = await req.json();
     const isUpdateMode = currentFiles && Object.keys(currentFiles).length > 0;
@@ -633,7 +634,6 @@ RULES:
     return new Response(stream, {
       headers: {
         "Content-Type": "text/plain; charset=utf-8",
-        "Transfer-Encoding": "chunked",
       }
     });
 

@@ -4,6 +4,7 @@ import { clerkMiddleware, createRouteMatcher } from "@clerk/nextjs/server";
 const isPublicRoute = createRouteMatcher(["/", "/api/(.*)"]);
 
 export default clerkMiddleware(async (auth, req) => {
+  console.log("====== PROXY MIDDLEWARE HIT ======", req.url);
   if (!isPublicRoute(req)) {
     await auth.protect();
   }
