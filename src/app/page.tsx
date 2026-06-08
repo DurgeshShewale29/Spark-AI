@@ -2,21 +2,22 @@
 "use client";
 
 import { useState, useEffect, useRef, Suspense } from "react";
-import sdk, { VM } from "@stackblitz/sdk";
+import { WebContainer } from "@webcontainer/api";
+import 'xterm/css/xterm.css';
+import type { Terminal } from 'xterm';
+import type { FitAddon } from 'xterm-addon-fit';
+import Editor from "@monaco-editor/react";
 import { useRouter } from "next/navigation";
 import {
-  Loader2, Wand2, Box, Zap,
+  Loader2, Wand2, Box, Zap, Code, Eye,
   RefreshCw, Maximize, Minimize, Settings, X, History, MoreVertical,
   Edit2, Pin, Trash2, Check, ChevronLeft, ChevronUp, Plus, Upload, Send, Bot, ChevronDown, FileArchive, AlertTriangle, Github, Mic, Image as ImageIcon, FileCode2, Square, RotateCcw, LayoutTemplate,
-  Share2, Copy, CheckCheck, Inbox, ShieldAlert, Terminal as TerminalIcon
+  Share2, Copy, CheckCheck, Inbox, ShieldAlert, Terminal as TerminalIcon, Folder, FolderOpen, ChevronRight
 } from "lucide-react";
 import { useAuth, SignInButton, SignUpButton, UserButton, useUser } from "@clerk/nextjs";
 import type Pusher from "pusher-js";
 import type { Channel } from "pusher-js";
 
-import 'xterm/css/xterm.css';
-import type { Terminal } from 'xterm';
-import type { FitAddon } from 'xterm-addon-fit';
 
 interface ISpeechRecognitionEvent {
   resultIndex: number;
@@ -53,6 +54,52 @@ interface IWindow extends Window {
 }
 
 type ProjectFiles = Record<string, string>;
+
+export const convertToFileSystemTree = (files: Record<string, string>) => {
+  const tree: any = {};
+  for (const [path, contents] of Object.entries(files)) {
+    const parts = path.replace(/^\//, '').split('/');
+    let current = tree;
+    for (let i = 0; i < parts.length - 1; i++) {
+      const part = parts[i];
+      if (!current[part]) current[part] = { directory: {} };
+      current = current[part].directory;
+    }
+    current[parts[parts.length - 1]] = { file: { contents } };
+  }
+  return tree;
+};
+
+export const getFsSnapshot = async (vm: any, dir = ''): Promise<Record<string, string>> => {
+  const snapshot: Record<string, string> = {};
+  let entries;
+  try { entries = await vm.fs.readdir(dir || '/', { withFileTypes: true }); }
+  catch(e) { return snapshot; }
+  for (const entry of entries) {
+    if (['node_modules', '.git', '.next'].includes(entry.name)) continue;
+    const fullPath = dir ? `${dir}/${entry.name}` : entry.name;
+    if (entry.isDirectory()) {
+      Object.assign(snapshot, await getFsSnapshot(vm, fullPath));
+    } else {
+      try { snapshot[fullPath] = await vm.fs.readFile(fullPath, 'utf-8'); } catch (e) {}
+    }
+  }
+  return snapshot;
+};
+
+export const applyFsDiff = async (vm: any, diff: { create: Record<string, string>, destroy: string[] }) => {
+  for (const file of diff.destroy) {
+    try { await vm.fs.rm(file, { recursive: true }); } catch(e) {}
+  }
+  for (const [file, content] of Object.entries(diff.create)) {
+    const parts = file.split('/');
+    parts.pop();
+    if (parts.length > 0) {
+      try { await vm.fs.mkdir(parts.join('/'), { recursive: true }); } catch(e) {}
+    }
+    await vm.fs.writeFile(file, content);
+  }
+};
 
 type Message = {
   id?: string;
@@ -107,6 +154,110 @@ const renderMessage = (content: string) => {
   });
 };
 
+type UIFileNode = { type: 'file'; name: string; originalPath: string; };
+type UIDirNode = { type: 'directory'; name: string; children: Record<string, UINode>; };
+type UINode = UIFileNode | UIDirNode;
+
+const buildUITree = (files: Record<string, string>) => {
+  const root: Record<string, UINode> = {};
+  for (const path of Object.keys(files)) {
+    const parts = path.replace(/^\//, '').split('/');
+    let current = root;
+    for (let i = 0; i < parts.length - 1; i++) {
+      const part = parts[i];
+      if (!current[part]) {
+        current[part] = { type: 'directory', name: part, children: {} };
+      }
+      current = (current[part] as UIDirNode).children;
+    }
+    const fileName = parts[parts.length - 1];
+    current[fileName] = { type: 'file', name: fileName, originalPath: path };
+  }
+  return root;
+};
+
+const FileTreeNode = ({ node, level, selectedFile, onSelect, defaultExpanded = false }: { node: UINode; level: number; selectedFile: string | null; onSelect: (path: string) => void; defaultExpanded?: boolean }) => {
+  const [isExpanded, setIsExpanded] = useState(defaultExpanded || level === 0);
+  
+  if (node.type === 'file') {
+    const isSelected = selectedFile === node.originalPath;
+    return (
+      <button
+        onClick={() => onSelect(node.originalPath)}
+        title={node.originalPath}
+        style={{ paddingLeft: `${level * 12 + 8}px` }}
+        className={`flex items-center gap-1.5 w-full py-1 pr-3 text-[13px] text-left truncate transition-colors ${isSelected ? 'bg-blue-500/10 text-blue-400 font-medium' : 'text-gray-400 hover:bg-gray-800 hover:text-gray-200'}`}
+      >
+        <span className="w-4 h-4 shrink-0" />
+        <FileCode2 className="w-3.5 h-3.5 shrink-0 opacity-70" />
+        <span className="truncate">{node.name}</span>
+      </button>
+    );
+  }
+
+  const children = Object.values(node.children).sort((a, b) => {
+    if (a.type === 'directory' && b.type === 'file') return -1;
+    if (a.type === 'file' && b.type === 'directory') return 1;
+    return a.name.localeCompare(b.name);
+  });
+
+  return (
+    <div className="flex flex-col w-full">
+      <button
+        onClick={() => setIsExpanded(!isExpanded)}
+        style={{ paddingLeft: `${level * 12 + 8}px` }}
+        className="flex items-center gap-1.5 w-full py-1 pr-3 text-[13px] text-left truncate transition-colors text-gray-300 hover:bg-gray-800 hover:text-white group"
+      >
+        <span className="w-4 h-4 flex items-center justify-center opacity-70 group-hover:opacity-100 shrink-0">
+          {isExpanded ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+        </span>
+        {isExpanded ? <FolderOpen className="w-3.5 h-3.5 shrink-0 text-blue-400" /> : <Folder className="w-3.5 h-3.5 shrink-0 text-blue-400 opacity-80" />}
+        <span className="truncate font-medium">{node.name}</span>
+      </button>
+      {isExpanded && (
+        <div className="flex flex-col w-full">
+          {children.map(child => (
+            <FileTreeNode
+              key={child.name}
+              node={child}
+              level={level + 1}
+              selectedFile={selectedFile}
+              onSelect={onSelect}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
+const FileTree = ({ files, selectedFile, onSelect }: { files: Record<string, string>, selectedFile: string | null, onSelect: (path: string) => void }) => {
+  const tree = buildUITree(files);
+  const rootNodes = Object.values(tree).sort((a, b) => {
+    if (a.type === 'directory' && b.type === 'file') return -1;
+    if (a.type === 'file' && b.type === 'directory') return 1;
+    return a.name.localeCompare(b.name);
+  });
+
+  return (
+    <div className="w-56 bg-[#0A0C10] border-r border-gray-800 flex flex-col h-full overflow-y-auto custom-scrollbar shrink-0">
+      <div className="p-3 text-[10px] font-bold text-gray-500 uppercase tracking-widest sticky top-0 bg-[#0A0C10]/90 backdrop-blur-sm z-10">Explorer</div>
+      <div className="flex flex-col pb-4">
+        {rootNodes.map(node => (
+          <FileTreeNode
+            key={node.name}
+            node={node}
+            level={0}
+            selectedFile={selectedFile}
+            onSelect={onSelect}
+            defaultExpanded={true}
+          />
+        ))}
+      </div>
+    </div>
+  );
+};
+
 function HomeContent() {
   const { userId, isLoaded } = useAuth();
   const { user } = useUser();
@@ -128,6 +279,35 @@ function HomeContent() {
   const [isRefactoringRemote, setIsRefactoringRemote] = useState(false);
 
   const [files, setFiles] = useState<ProjectFiles | null>(null);
+  const [activeView, setActiveView] = useState<'code' | 'preview'>('preview');
+  const [selectedFile, setSelectedFile] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (files && !selectedFile) {
+      const defaultFile = Object.keys(files).find(f => f.includes('page.tsx') || f.includes('App.tsx') || f.includes('index.tsx') || f.includes('index.html')) || Object.keys(files)[0];
+      setSelectedFile(defaultFile || null);
+    }
+  }, [files, selectedFile]);
+
+  const pendingEdits = useRef<Record<string, string>>({});
+  const editorSyncTimer = useRef<NodeJS.Timeout | null>(null);
+
+  const handleEditorChange = (path: string, content: string) => {
+    setFiles(prev => prev ? { ...prev, [path]: content } : null);
+    
+    pendingEdits.current[path] = content;
+    if (editorSyncTimer.current) clearTimeout(editorSyncTimer.current);
+    
+    editorSyncTimer.current = setTimeout(async () => {
+      if (vmRef.current && Object.keys(pendingEdits.current).length > 0) {
+        await applyFsDiff(vmRef.current, {
+          create: pendingEdits.current,
+          destroy: []
+        });
+        pendingEdits.current = {};
+      }
+    }, 1000);
+  };
   const [error, setError] = useState<string | null>(null);
 
   const [previewKey, setPreviewKey] = useState(0);
@@ -174,64 +354,6 @@ function HomeContent() {
 
   const [mismatchData, setMismatchData] = useState<{ target: string, prompt: string } | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<{ type: 'single' | 'all', id?: string } | null>(null);
-  const [detectedError, setDetectedError] = useState<string | null>(null);
-  const [isTerminalOpen, setIsTerminalOpen] = useState(true);
-  const [terminalHeight, setTerminalHeight] = useState(256);
-
-  const terminalRef = useRef<Terminal | null>(null);
-  const fitAddonRef = useRef<FitAddon | null>(null);
-  const terminalContainerRef = useRef<HTMLDivElement>(null);
-  const lastStdoutLenRef = useRef<number>(0);
-
-  useEffect(() => {
-    let term: Terminal;
-    let fitAddon: FitAddon;
-
-    const initTerminal = async () => {
-      if (terminalContainerRef.current && !terminalRef.current) {
-        // We statically imported the types, but we dynamically import the classes
-        const { Terminal } = await import('xterm');
-        const { FitAddon } = await import('xterm-addon-fit');
-
-        term = new Terminal({
-          theme: {
-            background: '#0B0D11',
-            foreground: '#e5e7eb',
-            cursor: '#3b82f6',
-            black: '#000000',
-            red: '#ef4444',
-            green: '#22c55e',
-            yellow: '#eab308',
-            blue: '#3b82f6',
-            magenta: '#d946ef',
-            cyan: '#06b6d4',
-            white: '#ffffff',
-          },
-          fontFamily: 'Menlo, Monaco, "Courier New", monospace',
-          fontSize: 12,
-          cursorBlink: true,
-          disableStdin: true,
-          convertEol: true
-        });
-
-        fitAddon = new FitAddon();
-        term.loadAddon(fitAddon);
-        
-        term.open(terminalContainerRef.current);
-        fitAddon.fit();
-        
-        term.writeln('\\x1b[38;2;59;130;246m[Spark AI]\\x1b[0m Terminal initialized. Waiting for container...');
-
-        terminalRef.current = term;
-        fitAddonRef.current = fitAddon;
-
-        const resizeObserver = new ResizeObserver(() => fitAddon.fit());
-        resizeObserver.observe(terminalContainerRef.current);
-      }
-    };
-
-    initTerminal();
-  }, []);
 
   const activeChat = history.find(h => h.id === currentChatId);
   const userEmail = user?.emailAddresses[0]?.emailAddress?.toLowerCase();
@@ -239,31 +361,7 @@ function HomeContent() {
   const isEditor = activeChat?.collaborators?.some(c => c.email === userEmail && c.role === 'editor');
   const isReadOnly = Boolean(currentChatId && !isOwner && !isEditor);
 
-  useEffect(() => {
-    const handleMessage = (e: MessageEvent) => {
-      if (e.data && e.data.type === 'SPARK_RUNTIME_ERROR' && e.data.message) {
-        const msg = String(e.data.message);
-        if (!msg.includes('Warning:') && !msg.includes('Download the React DevTools') && !msg.includes('The resource http')) {
-          setDetectedError(msg);
-        }
-      }
-    };
-    window.addEventListener('message', handleMessage);
-    return () => window.removeEventListener('message', handleMessage);
-  }, []);
 
-  useEffect(() => {
-    const handleMessage = (e: MessageEvent) => {
-      if (e.data && e.data.type === 'SPARK_RUNTIME_ERROR' && e.data.message) {
-        const msg = String(e.data.message);
-        if (!msg.includes('Warning:') && !msg.includes('Download the React DevTools') && !msg.includes('The resource http')) {
-          setDetectedError(msg);
-        }
-      }
-    };
-    window.addEventListener('message', handleMessage);
-    return () => window.removeEventListener('message', handleMessage);
-  }, []);
 
   // 🚀 WEBCONTAINER FILE SYSTEM POLLER (Catches Terminal Errors & Auto-Installs)
   useEffect(() => {
@@ -272,23 +370,8 @@ function HomeContent() {
     const interval = setInterval(async () => {
       if (!vmRef.current) return;
       try {
-        const fsSnapshot = await vmRef.current.getFsSnapshot();
+        const fsSnapshot = await getFsSnapshot(vmRef.current);
         
-        // 🚀 PIPING STDOUT TO XTERM
-        if (fsSnapshot && fsSnapshot['.spark_stdout.log'] && terminalRef.current) {
-          const outContent = fsSnapshot['.spark_stdout.log'];
-          const lastLen = lastStdoutLenRef.current;
-          
-          if (outContent.length > lastLen) {
-            terminalRef.current.write(outContent.slice(lastLen));
-            lastStdoutLenRef.current = outContent.length;
-          } else if (outContent.length < lastLen) {
-            terminalRef.current.clear();
-            terminalRef.current.write(outContent);
-            lastStdoutLenRef.current = outContent.length;
-          }
-        }
-
         if (fsSnapshot && fsSnapshot['.spark_error.log']) {
           const errContent = fsSnapshot['.spark_error.log'];
           if (errContent) {
@@ -330,7 +413,7 @@ function HomeContent() {
                     lastInstallTime = Date.now();
 
                     // 3. Update OS (Triggers npm install)
-                    await vmRef.current.applyFsDiff({
+                    await applyFsDiff(vmRef.current, {
                       create: { 'package.json': newPkgStr },
                       destroy: ['.spark_error.log']
                     });
@@ -344,8 +427,8 @@ function HomeContent() {
             }
 
             // 🚀 2. FALLBACK: If not an import error, or 15s have passed and it's still broken
-            setDetectedError("TERMINAL COMPILATION ERROR:\n" + errContent);
-            await vmRef.current.applyFsDiff({ create: {}, destroy: ['.spark_error.log'] });
+            console.error("TERMINAL COMPILATION ERROR:\n" + errContent);
+            await applyFsDiff(vmRef.current, { create: {}, destroy: ['.spark_error.log'] });
           }
         }
       } catch (e) {
@@ -356,8 +439,15 @@ function HomeContent() {
     return () => clearInterval(interval);
   }, []);
 
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [isTerminalOpen, setIsTerminalOpen] = useState(true);
+  const [terminalHeight, setTerminalHeight] = useState(256);
+  const terminalRef = useRef<Terminal | null>(null);
+  const fitAddonRef = useRef<FitAddon | null>(null);
+  const terminalContainerRef = useRef<HTMLDivElement>(null);
+
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
-  const vmRef = useRef<VM | null>(null);
+  const vmRef = useRef<WebContainer | null>(null);
   const filesRef = useRef<ProjectFiles | null>(null);
   filesRef.current = files;
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -596,6 +686,41 @@ function HomeContent() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [previewKey, isReadOnly]);
 
+  // 🚀 TERMINAL UI INITIALIZATION
+  useEffect(() => {
+    let term: Terminal;
+    let fitAddon: FitAddon;
+
+    const initTerminal = async () => {
+      if (terminalContainerRef.current && !terminalRef.current) {
+        const { Terminal } = await import('xterm');
+        const { FitAddon } = await import('xterm-addon-fit');
+
+        term = new Terminal({
+          theme: { background: '#0B0D11', foreground: '#e5e7eb', cursor: '#3b82f6' },
+          fontFamily: 'Menlo, Monaco, "Courier New", monospace',
+          fontSize: 12,
+          cursorBlink: true,
+          convertEol: true
+        });
+
+        fitAddon = new FitAddon();
+        term.loadAddon(fitAddon);
+        term.open(terminalContainerRef.current);
+        fitAddon.fit();
+        
+        term.writeln('\x1b[38;2;59;130;246m[Spark AI]\x1b[0m Terminal UI ready.');
+
+        terminalRef.current = term;
+        fitAddonRef.current = fitAddon;
+
+        const resizeObserver = new ResizeObserver(() => fitAddon.fit());
+        resizeObserver.observe(terminalContainerRef.current);
+      }
+    };
+    initTerminal();
+  }, [files]);
+
   // 🚀 THE ULTIMATE PAYLOAD SANITIZER: This guarantees StackBlitz never 400 crashes again.
   const mountStackBlitz = async (projectFiles: ProjectFiles) => {
     const cleanFiles: Record<string, string> = {};
@@ -663,7 +788,6 @@ function HomeContent() {
 
     cleanFiles["package.json"] = JSON.stringify(basePkg, null, 2);
 
-    // 🚀 INJECT THE OS-LEVEL ERROR HIJACKER (File System Bridge)
     cleanFiles[".spark_wrapper.js"] = `
 const { spawn } = require('child_process');
 const fs = require('fs');
@@ -674,30 +798,21 @@ const child = spawn('npm', ['run', 'actual-dev'], {
 });
 
 let errorLog = '';
-let stdoutBuffer = '';
 
 const stripAnsi = (str) => str.replace(/\\x1B\\[\\d+m/g, '').replace(/\\x1b\\[[0-9;]*m/g, '');
 
 const checkError = () => {
   const cleanLog = stripAnsi(errorLog);
-  // 🚀 Added "Module not found" and "Cannot find" to trigger the auto-installer
-  if (cleanLog.includes('Failed to compile') || cleanLog.includes('Build Error') || cleanLog.includes('Syntax error') || cleanLog.includes('NonErrorEmittedError') || cleanLog.includes('Module not found') || cleanLog.includes('Cannot find')) {
+  if (cleanLog.includes('Failed to compile') || cleanLog.includes('Build Error') || cleanLog.includes('Syntax error') || cleanLog.includes('Module not found') || cleanLog.includes('Cannot find')) {
      fs.writeFileSync('.spark_error.log', cleanLog);
   }
-};
-
-const appendStdout = (data) => {
-  stdoutBuffer += data;
-  if (stdoutBuffer.length > 250000) stdoutBuffer = stdoutBuffer.slice(-250000); // 250kb max
-  try { fs.writeFileSync('.spark_stdout.log', stdoutBuffer); } catch (e) {}
 };
 
 child.stdout.on('data', data => {
   process.stdout.write(data);
   const strData = data.toString();
   errorLog += strData;
-  if (errorLog.length > 10000) errorLog = errorLog.slice(-10000); // Prevent memory bloat
-  appendStdout(strData);
+  if (errorLog.length > 10000) errorLog = errorLog.slice(-10000);
   checkError();
 });
 
@@ -706,41 +821,47 @@ child.stderr.on('data', data => {
   const strData = data.toString();
   errorLog += strData;
   if (errorLog.length > 10000) errorLog = errorLog.slice(-10000);
-  appendStdout(strData);
   checkError();
-});
-
-child.on('exit', (code) => {
-  if (code !== 0) {
-     fs.writeFileSync('.spark_error.log', stripAnsi(errorLog));
-  }
 });
 `;
 
-    cleanFiles[".stackblitzrc"] = JSON.stringify({
-      installDependencies: true,
-      startCommand: "npm run dev",
-      env: { NEXT_TELEMETRY_DISABLED: "1", NODE_ENV: "development" }
-    }, null, 2);
-
-    const containerId = `stackblitz-${previewKey}`;
-    const containerElement = document.getElementById(containerId);
-
-    if (!containerElement) return;
-
     try {
-      const vm = await sdk.embedProject(
-        containerElement,
-        { title: "Spark AI Project", description: "Generated full-stack application", template: "node", files: cleanFiles },
-        {
-          view: isReadOnly ? "preview" : "default",
-          theme: "dark",
-          showSidebar: !isReadOnly,
-          height: "100%"
-        }
-      );
+      if (!vmRef.current) {
+        vmRef.current = await WebContainer.boot();
+      }
+      const vm = vmRef.current;
+      
+      const fileSystemTree = convertToFileSystemTree(cleanFiles);
+      await vm.mount(fileSystemTree);
 
-      vmRef.current = vm;
+      vm.on('server-ready', (port, url) => {
+        setPreviewUrl(url);
+      });
+
+      if (terminalRef.current) {
+        terminalRef.current.clear();
+        terminalRef.current.writeln('\x1b[38;2;59;130;246m[Spark AI]\x1b[0m Booting WebContainer environment...');
+      }
+
+      const installProcess = await vm.spawn('npm', ['install']);
+      if (terminalRef.current) {
+        installProcess.output.pipeTo(new WritableStream({
+          write(data) { terminalRef.current?.write(data); }
+        }));
+      }
+      await installProcess.exit;
+
+      if (terminalRef.current) {
+        terminalRef.current.writeln('\x1b[38;2;34;197;94m[Spark AI]\x1b[0m Dependencies installed. Starting dev server...');
+      }
+
+      const devProcess = await vm.spawn('npm', ['run', 'dev']);
+      if (terminalRef.current) {
+        devProcess.output.pipeTo(new WritableStream({
+          write(data) { terminalRef.current?.write(data); }
+        }));
+      }
+
     } catch (sdkError) {
       console.warn("StackBlitz VM Connection Timeout/Warning. The preview might need a moment to reconnect:", sdkError);
     }
@@ -997,7 +1118,7 @@ child.on('exit', (code) => {
     let currentFilesToPush = files;
     if (vmRef.current) {
       try {
-        const fsSnapshot = await vmRef.current.getFsSnapshot();
+        const fsSnapshot = await getFsSnapshot(vmRef.current);
         if (fsSnapshot && Object.keys(fsSnapshot).length > 0) {
           const syncedFiles: ProjectFiles = {};
           Object.entries(fsSnapshot).forEach(([path, content]) => {
@@ -1244,7 +1365,7 @@ child.on('exit', (code) => {
 
     if (vmRef.current && isUpdateMode) {
       try {
-        const fsSnapshot = await vmRef.current.getFsSnapshot();
+        const fsSnapshot = await getFsSnapshot(vmRef.current);
         if (fsSnapshot && Object.keys(fsSnapshot).length > 0) {
           const syncedFiles: ProjectFiles = {};
           Object.entries(fsSnapshot).forEach(([path, content]) => {
@@ -1529,7 +1650,7 @@ child.on('exit', (code) => {
           const pendingDestroys = customWindow._pendingDestroys || [];
 
           if (Object.keys(diffFiles).length > 0 || pendingDestroys.length > 0) {
-            await vmRef.current.applyFsDiff({
+            await applyFsDiff(vmRef.current, {
               create: diffFiles,
               destroy: pendingDestroys
             });
@@ -1599,7 +1720,7 @@ child.on('exit', (code) => {
         setFiles(chat.files);
 
         try {
-          await vmRef.current.applyFsDiff({ create: diffFiles, destroy: destroyFiles });
+          await applyFsDiff(vmRef.current, { create: diffFiles, destroy: destroyFiles });
           return;
         } catch {
           setPreviewKey(prev => prev + 1);
@@ -1765,7 +1886,6 @@ child.on('exit', (code) => {
   };
 
   const handleRebootSandbox = () => {
-    setDetectedError(null);
     setPreviewKey((prev) => prev + 1);
   };
 
@@ -2814,7 +2934,22 @@ child.on('exit', (code) => {
 
         {files && previewKey > 0 ? (
           <>
-            <div className="flex items-center bg-[#0A0C10] border-b border-gray-800/80 px-4 py-2.5 shrink-0 justify-end z-10 shadow-sm animate-in fade-in duration-500">
+            <div className="flex items-center bg-[#0A0C10] border-b border-gray-800/80 px-4 py-2.5 shrink-0 justify-between z-10 shadow-sm animate-in fade-in duration-500">
+              <div className="flex items-center bg-gray-900/80 rounded-lg p-1 border border-gray-800/50 shadow-inner">
+                <button 
+                  onClick={() => setActiveView('code')}
+                  className={`flex items-center gap-2 px-4 py-1 text-[13px] font-semibold rounded-md transition-all duration-200 ${activeView === 'code' ? 'bg-[#1E293B] text-blue-400 shadow-md border border-blue-500/20' : 'text-gray-500 hover:text-gray-300 hover:bg-gray-800/50'}`}
+                >
+                  <Code className="w-4 h-4" /> Code
+                </button>
+                <button 
+                  onClick={() => setActiveView('preview')}
+                  className={`flex items-center gap-2 px-4 py-1 text-[13px] font-semibold rounded-md transition-all duration-200 ${activeView === 'preview' ? 'bg-[#1E293B] text-blue-400 shadow-md border border-blue-500/20' : 'text-gray-500 hover:text-gray-300 hover:bg-gray-800/50'}`}
+                >
+                  <Eye className="w-4 h-4" /> Preview
+                </button>
+              </div>
+
               <div className="flex items-center gap-2">
 
                 {isOwner && (
@@ -2847,14 +2982,47 @@ child.on('exit', (code) => {
             </div>
 
             <div className="flex-1 w-full h-full flex flex-col overflow-hidden relative animate-in fade-in duration-700">
-              <div className="flex-1 w-full min-h-0 bg-[#1e1e1e]" key={previewKey}>
-                <div id={`stackblitz-${previewKey}`} className="w-full h-full" />
+              <div className="flex-1 w-full min-h-0 bg-[#1e1e1e] flex" key={previewKey}>
+                {activeView === 'code' ? (
+                  <div className="flex w-full h-full bg-[#1e1e1e] animate-in fade-in duration-300">
+                    <FileTree files={files} selectedFile={selectedFile} onSelect={setSelectedFile} />
+                    <div className="flex-1 h-full relative">
+                      {selectedFile && (
+                        <Editor
+                          height="100%"
+                          theme="vs-dark"
+                          path={selectedFile}
+                          defaultLanguage={selectedFile.endsWith('.tsx') || selectedFile.endsWith('.ts') ? 'typescript' : selectedFile.endsWith('.css') ? 'css' : selectedFile.endsWith('.html') ? 'html' : 'json'}
+                          value={files[selectedFile]}
+                          onChange={(value) => handleEditorChange(selectedFile, value || '')}
+                          options={{
+                            minimap: { enabled: false },
+                            fontSize: 14,
+                            wordWrap: 'on',
+                            padding: { top: 16 },
+                            scrollBeyondLastLine: false,
+                            smoothScrolling: true,
+                            cursorBlinking: 'smooth',
+                            cursorSmoothCaretAnimation: 'on',
+                            formatOnPaste: true,
+                          }}
+                        />
+                      )}
+                    </div>
+                  </div>
+                ) : (
+                  previewUrl ? (
+                    <iframe src={previewUrl} className="w-full h-full border-none" allow="cross-origin-isolated" />
+                  ) : (
+                    <div className="flex items-center justify-center h-full text-gray-500 text-sm font-medium animate-pulse">Waiting for WebContainer dev server...</div>
+                  )
+                )}
               </div>
               
               {/* Terminal Panel */}
               <div 
                 style={{ height: isTerminalOpen ? terminalHeight : 37 }} 
-                className="border-t border-gray-800 bg-[#0B0D11] flex flex-col relative shrink-0"
+                className="border-t border-gray-800 bg-[#0B0D11] flex flex-col relative shrink-0 transition-[height] duration-200 ease-out"
               >
                 {isTerminalOpen && (
                   <div 
@@ -2872,7 +3040,6 @@ child.on('exit', (code) => {
                       const handleMouseUp = () => {
                         document.removeEventListener('mousemove', handleMouseMove);
                         document.removeEventListener('mouseup', handleMouseUp);
-                        // Fit terminal to new size
                         setTimeout(() => fitAddonRef.current?.fit(), 50);
                       };
                       
@@ -2897,35 +3064,6 @@ child.on('exit', (code) => {
                 </div>
                 <div className={`flex-1 overflow-hidden relative ${!isTerminalOpen ? 'hidden' : ''}`}>
                   <div ref={terminalContainerRef} className="w-full h-full p-2" />
-                  
-                  {/* Floating Cursor-Style Auto-Fix */}
-                  {detectedError && (
-                    <div className="absolute top-4 right-6 z-50 animate-in slide-in-from-right-4 fade-in">
-                      <button
-                        onClick={() => {
-                          const errorText = detectedError;
-                          setDetectedError(null);
-                          setInputPrompt("");
-
-                          const cleansedHistory = [...messages];
-                          if (cleansedHistory.length > 0 && cleansedHistory[cleansedHistory.length - 1].role === "assistant") {
-                            cleansedHistory.pop();
-                          }
-
-                          const aggressivePrompt = `FATAL ERROR:\n\n${errorText}\n\nSYSTEM OVERRIDE: Your previous attempt failed. DO NOT repeat the exact code.\n\nCRITICAL INSTRUCTION: If this is a Syntax Error or "Module not found", DO NOT use <UPDATE> patches. Your previous file is corrupted. You MUST completely rewrite the broken file using <FILE_START path="/path">...</FILE_END> to guarantee a clean slate. Ensure all imports are present.`;
-
-                          handleGenerate({
-                            overridePrompt: aggressivePrompt,
-                            overrideMessages: cleansedHistory,
-                            skipWarning: true
-                          });
-                        }}
-                        className="flex items-center gap-2 bg-blue-600 hover:bg-blue-500 text-white px-3 py-1.5 rounded-lg text-xs font-bold shadow-lg transition-all active:scale-95 border border-blue-400/30"
-                      >
-                        <Wand2 className="w-3.5 h-3.5" /> Fix in Chat
-                      </button>
-                    </div>
-                  )}
                 </div>
               </div>
             </div>
