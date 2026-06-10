@@ -552,23 +552,20 @@ RULES:
               4. FETCH: Call fetch('/api/...') directly. It is a GLOBAL browser API. NEVER import it.
               5. LOADING STATE: Always show an animated spinner while data loads.
               6. ERROR STATE: Always wrap fetch in try/catch and show a user-friendly error message.
-
-              === PREMIUM DESIGN SYSTEM ===
-              You MUST make the UI look like a premium SaaS product, not a student project.
-              - COLOR PALETTE: Use a cohesive dark theme (bg-gray-950, bg-gray-900) with vibrant accent colors (blue-500, purple-500, emerald-500). No plain white backgrounds.
-              - TYPOGRAPHY: Use font-bold and text-xl/2xl/3xl for headings. Use text-gray-400 for secondary text. Proper hierarchy.
-              - CARDS: Use bg-gray-900/50 backdrop-blur-xl border border-gray-800/50 rounded-2xl p-6 shadow-xl for card containers.
-              - GLASSMORPHISM: Use backdrop-blur-xl bg-white/5 border border-white/10 for glass effects.
-              - GRADIENTS: Use bg-gradient-to-br from-blue-500 to-purple-600 for accent backgrounds and buttons.
-              - HOVER STATES: Every clickable element MUST have hover:scale-[1.02] transition-all duration-300 hover:shadow-lg.
-              - ICONS: Place lucide-react icons inside colored rounded-xl bg-blue-500/10 p-3 containers for visual hierarchy.
-              - SPACING: Use generous padding (p-6, p-8) and gaps (gap-6). Never cramped.
-              - RESPONSIVE: Use grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 for card grids.
-              - SIDEBAR: If a sidebar is needed, use w-64 bg-gray-950 border-r border-gray-800 with nav items using rounded-xl hover:bg-gray-800/50.
-              - STAT CARDS: Display key numbers in text-3xl font-bold with colored trend indicators (text-emerald-400 for positive, text-red-400 for negative).
-              - TABLES: Use divide-y divide-gray-800 with hover:bg-gray-800/30 row highlights.
-              - AVATARS: Use rounded-full with ring-2 ring-gray-800 borders.
-              - EMPTY STATES: If no data, show a centered icon + message, never a blank page.
+              === FRONTEND EXCELLENCE & BUG PREVENTION ===
+              1. NO BROKEN IMAGES: NEVER use <img> tags with fake/placeholder URLs (like src="/placeholder.jpg"). They render as broken icons. Instead, use lucide-react icons or generate styled generic <div> placeholders.
+              2. UI QUALITY & CONTRAST (CRITICAL): You have total creative freedom over the layout and color palette, BUT you must adhere to modern SaaS design principles:
+                 - Dark Mode Text (CRITICAL): If using a dark background, you MUST use \`text-white\` or \`text-gray-50\` for primary text, and \`text-gray-400\` for secondary/paragraph text. NEVER use text-gray-600 or text-gray-800 on a dark background (it is unreadable).
+                 - Dark Mode Cards: Use \`bg-gray-800/50\` or \`bg-white/5\` with \`border-white/10\`.
+                 - Light Mode Cards: Use \`bg-white\` with subtle shadows (\`shadow-sm\`) and \`border-gray-100\`.
+              3. TYPOGRAPHY: Modern UI is dense. Use text-sm for standard body text. Use font-extrabold tracking-tight for massive hero headlines.
+              4. GLOBAL THEMING: If building a dark theme, you MUST output \`app/globals.css\` and apply the background color to the \`body\` tag (e.g., \`body { @apply bg-[#09090b] text-white; }\`) to prevent scrolling glitches.
+              5. MODERN UI AESTHETICS: DO NOT build basic, plain wireframes. You MUST use modern UI trends. Depending on the user's prompt, utilize:
+                 - Gradients: Use bg-gradient-to-r and bg-clip-text text-transparent for striking headlines.
+                 - Glassmorphism: backdrop-blur-xl bg-white/5 or bg-black/5 for sleek, translucent panels.
+                 - Layouts: Bento-box grids (varying col-spans), sticky sidebars, floating navbars.
+                 - Buttons & Elements: Always include prominent, beautifully styled Call-to-Action buttons (e.g., rounded-full bg-blue-600 hover:bg-blue-700 text-white shadow-lg transition-all px-6 py-2), colorful badges, and detailed footers.
+              6. COMPOSITION & INTERACTIVITY: Build complex, realistic interfaces with hover states (hover:scale-[1.02]), loading spinners, and empty states. Use lucide-react heavily.
               `
             ];
             // Image handling
@@ -622,7 +619,8 @@ RULES:
         - If any file uses ../../lib/db or ../../../lib/db in imports, change to @/lib/db
         - DO NOT output these files (our system auto-injects them): tailwind.config.js, postcss.config.js, tsconfig.json, next.config.js, app/layout.tsx, app/globals.css
 
-        STEP 3 - SYNTAX FIXES:
+        STEP 3 - SYNTAX & LOGIC FIXES:
+        - REMOVE all <img> tags that use placeholder or fake URLs (like src="/placeholder.jpg" or src=""). Replace them with a styled div placeholder.
         - Fix duplicate variable declarations
         - Fix missing closing brackets, parentheses, or JSX tags
         - Ensure every React component has a proper default export

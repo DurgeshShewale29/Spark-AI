@@ -997,26 +997,13 @@ child.stderr.on('data', data => {
 
         data["/next.config.js"] = `/** @type {import('next').NextConfig} */\nconst nextConfig = { swcMinify: false, eslint: { ignoreDuringBuilds: true }, typescript: { ignoreBuildErrors: true }, images: { remotePatterns: [{ protocol: 'https', hostname: '**' }, { protocol: 'http', hostname: '**' }] } };\nmodule.exports = nextConfig;`;
 
-        data["/app/layout.tsx"] = `import "./globals.css";\n\nexport default function RootLayout({ children }: { children: React.ReactNode }) {\n  return (\n    <html lang="en" suppressHydrationWarning>\n      <head>\n        <script dangerouslySetInnerHTML={{ __html: "window.addEventListener('error', function(e) { window.parent.postMessage({type: 'SPARK_RUNTIME_ERROR', message: e.message}, '*'); }); window.addEventListener('unhandledrejection', function(e) { window.parent.postMessage({type: 'SPARK_RUNTIME_ERROR', message: e.reason ? e.reason.message || e.reason : 'Unknown Promise Rejection'}, '*'); }); const originalConsoleError = console.error; console.error = function(...args) { let msg = args[0] instanceof Error ? args[0].message : (typeof args[0] === 'string' ? args[0] : String(args[0])); if (msg && !msg.includes('Warning:')) { window.parent.postMessage({type: 'SPARK_RUNTIME_ERROR', message: msg}, '*'); } originalConsoleError.apply(console, args); };" }} />\n      </head>\n      <body suppressHydrationWarning className="antialiased bg-[#0a0a0a] text-white min-h-screen">\n        {children}\n      </body>\n    </html>\n  );\n}`;
+        data["/app/layout.tsx"] = `import "./globals.css";\n\nexport default function RootLayout({ children }: { children: React.ReactNode }) {\n  return (\n    <html lang="en" suppressHydrationWarning>\n      <head>\n        <script dangerouslySetInnerHTML={{ __html: "window.addEventListener('error', function(e) { window.parent.postMessage({type: 'SPARK_RUNTIME_ERROR', message: e.message}, '*'); }); window.addEventListener('unhandledrejection', function(e) { window.parent.postMessage({type: 'SPARK_RUNTIME_ERROR', message: e.reason ? e.reason.message || e.reason : 'Unknown Promise Rejection'}, '*'); }); const originalConsoleError = console.error; console.error = function(...args) { let msg = args[0] instanceof Error ? args[0].message : (typeof args[0] === 'string' ? args[0] : String(args[0])); if (msg && !msg.includes('Warning:')) { window.parent.postMessage({type: 'SPARK_RUNTIME_ERROR', message: msg}, '*'); } originalConsoleError.apply(console, args); };" }} />\n      </head>\n      <body suppressHydrationWarning className="antialiased min-h-screen">\n        {children}\n      </body>\n    </html>\n  );\n}`;
 
-        // Ensure standard Next.js path exists
-        data["/app/globals.css"] = `@tailwind base;\n@tailwind components;\n@tailwind utilities;\n\nbody {\n  background-color: #0a0a0a;\n  color: #ffffff;\n}\n`;
+        // Only inject default globals.css if the AI didn't provide one
+        if (!data["/app/globals.css"] && !data["app/globals.css"]) {
+          data["/app/globals.css"] = `@tailwind base;\n@tailwind components;\n@tailwind utilities;\n\n/* Forcefully hide Dev Overlays */\nnextjs-portal, vite-error-overlay { display: none !important; }`;
+        }
       }
-
-      // 🚀 THE NUCLEAR CSS FIX: Find ANY CSS file the AI hallucinated and neutralize it
-      Object.keys(data).forEach(key => {
-        if (key.endsWith('.css')) {
-          data[key] = `@tailwind base;\n@tailwind components;\n@tailwind utilities;\n\nbody {\n  background-color: #0a0a0a;\n  color: #ffffff;\n}\n`;
-        }
-      });
-
-      // 🚀 BONUS FIX: Also protect Vite/React projects from the same error
-      const viteCssFiles = ["/src/index.css", "/src/styles.css"];
-      viteCssFiles.forEach(file => {
-        if (data[file]) {
-          data[file] = `@tailwind base;\n@tailwind components;\n@tailwind utilities;\n\nbody {\n  background-color: #0a0a0a;\n  color: #ffffff;\n}\n`;
-        }
-      });
     } else {
       if (currentFramework === "nextjs") {
         Object.keys(data).forEach(k => {
@@ -1408,6 +1395,9 @@ child.stderr.on('data', data => {
       setLoading(false);
       setIsStreaming(false);
       setIsUpdating(false);
+      setIsGeneratingRemote(false);
+      setIsArchitectingRemote(false);
+      setIsRefactoringRemote(false);
     }
   };
 
@@ -1780,6 +1770,9 @@ child.stderr.on('data', data => {
       setLoading(false);
       setIsUpdating(false);
       setIsStreaming(false);
+      setIsGeneratingRemote(false);
+      setIsArchitectingRemote(false);
+      setIsRefactoringRemote(false);
     }
   };
 
