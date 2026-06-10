@@ -1,14 +1,8 @@
-import { 
-  GoogleGenerativeAI, 
-  SchemaType, 
-  type FunctionCall, 
-  type ChatSession, 
-  type GenerateContentStreamResult,
-  type EnhancedGenerateContentResponse
-} from "@google/generative-ai";
+import OpenAI from "openai";
 import { NextResponse } from "next/server";
 import { connectToDB } from "@/lib/db";
 import GlobalRule from "@/models/GlobalRule";
+import { getAvailableApiKey } from "@/lib/apiKeyManager";
 
 export const maxDuration = 60;
 
@@ -20,7 +14,7 @@ interface RawRule {
 }
 
 type ChatMessage = {
-  role: string;
+  role: "user" | "model" | "assistant";
   content: string;
 };
 
@@ -28,20 +22,16 @@ export async function POST(req: Request) {
   try {
     const { messages, customApiKey } = await req.json();
     
-    let availableKeys: string[] = [];
-    if (process.env.GEMINI_API_KEY) availableKeys.push(process.env.GEMINI_API_KEY);
-    
-    for (let i = 1; i <= 20; i++) {
-      const alt = process.env[`GEMINI_API_KEY_ALT_${i}`];
-      if (alt) availableKeys.push(alt);
-    }
-    
-    availableKeys = availableKeys.sort(() => Math.random() - 0.5);
-    const API_KEYS = customApiKey ? [customApiKey, ...availableKeys] : availableKeys;
+    const apiKey = getAvailableApiKey(customApiKey);
 
-    if (API_KEYS.length === 0) {
+    if (!apiKey) {
       return NextResponse.json({ error: "API Key pool is empty. Please add keys to your .env" }, { status: 500 });
     }
+
+    const openai = new OpenAI({ 
+      apiKey: apiKey, 
+      baseURL: apiKey.startsWith('gsk_') ? 'https://api.groq.com/openai/v1' : undefined 
+    });
 
     await connectToDB();
     const rawRules = (await GlobalRule.find({}).lean()) as RawRule[];
@@ -51,7 +41,6 @@ export async function POST(req: Request) {
       ? activeRules.map((r) => `[RULE_ID: ${r._id.toString()}] - ${r.content}`).join("\n")
       : "No active rules currently in the database.";
 
-    // 🚀 FIXED: Upgraded to Enterprise Zero-Hallucination Prompt
     const systemPrompt = `
       You are the "Hive Mind Overseer", an elite, highly analytical AI Compliance Officer for Spark AI.
       Your absolute top priority is ZERO HALLUCINATION. You are a precise instrument.
@@ -80,112 +69,63 @@ export async function POST(req: Request) {
     `;
 
     const validMessages = messages.filter((m: ChatMessage) => !m.content.includes("Greetings, Admin"));
-    const history = validMessages.slice(0, -1).map((m: ChatMessage) => ({
-      role: m.role === "user" ? "user" : "model",
-      parts: [{ text: m.content }]
+    const history: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = validMessages.map((m: ChatMessage) => ({
+      role: m.role === "model" ? "assistant" : "user",
+      content: m.content
     }));
-    const latestMessage = validMessages[validMessages.length - 1].content;
 
-    let streamResult: GenerateContentStreamResult | null = null;
-    let successfulChat: ChatSession | null = null;
-    let lastErrorDetails = "";
-    let firstChunk: EnhancedGenerateContentResponse | null = null;
-
-    for (const currentKey of API_KEYS) {
-      try {
-        const genAI = new GoogleGenerativeAI(currentKey);
-        
-        // 🚀 FIXED: Locked the AI's creativity to 0 for maximum factual accuracy
-        const model = genAI.getGenerativeModel({ 
-          model: "gemini-2.5-flash",
-          generationConfig: {
-            temperature: 0,
-            topP: 0.1,
-          }
-        });
-
-        const chat = model.startChat({
-          history: [
-            { role: "user", parts: [{ text: systemPrompt }] },
-            { role: "model", parts: [{ text: "Understood. I am the Overseer. My archive tools are online and I will not hallucinate." }] },
-            ...history
-          ],
-          tools: [{
-            functionDeclarations: [{
-              name: "archive_rules",
-              description: "Safely moves one or multiple rules to the recycle bin by setting their isDeleted flag to true.",
-              parameters: {
-                type: SchemaType.OBJECT, 
-                properties: {
-                  ruleIds: { 
-                    type: SchemaType.ARRAY, 
-                    items: { type: SchemaType.STRING },
-                    description: "An array of exact MongoDB _id strings of the rules to move to the trash." 
-                  }
-                },
-                required: ["ruleIds"]
-              }
-            }]
-          }]
-        });
-
-        streamResult = await chat.sendMessageStream(latestMessage);
-        
-        const iterator = streamResult.stream[Symbol.asyncIterator]();
-        const firstYield = await iterator.next();
-        
-        if (!firstYield.done) {
-          firstChunk = firstYield.value;
-        }
-
-        successfulChat = chat; 
-        break;
-
-      } catch (e: unknown) {
-        lastErrorDetails = e instanceof Error ? e.message : String(e);
-        if (lastErrorDetails.includes("429") || lastErrorDetails.includes("Quota")) {
-          continue; 
-        } else {
-          break; 
+    const tools: OpenAI.Chat.Completions.ChatCompletionTool[] = [{
+      type: "function",
+      function: {
+        name: "archive_rules",
+        description: "Safely moves one or multiple rules to the recycle bin by setting their isDeleted flag to true.",
+        parameters: {
+          type: "object", 
+          properties: {
+            ruleIds: { 
+              type: "array", 
+              items: { type: "string" },
+              description: "An array of exact MongoDB _id strings of the rules to move to the trash." 
+            }
+          },
+          required: ["ruleIds"]
         }
       }
-    }
+    }];
 
-    if (!streamResult || !successfulChat) {
-      return NextResponse.json({ 
-        error: `All API keys are maxed out. Last error: ${lastErrorDetails}` 
-      }, { status: 500 });
-    }
+    const allMessages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
+      { role: "system", content: systemPrompt },
+      { role: "assistant", content: "Understood. I am the Overseer. My archive tools are online and I will not hallucinate." },
+      ...history
+    ];
 
-    const stream = new ReadableStream({
+    const stream = await openai.chat.completions.create({
+      model: "llama-3.3-70b-versatile",
+      messages: allMessages,
+      tools: tools,
+      temperature: 0,
+      stream: true,
+    });
+
+    const readableStream = new ReadableStream({
       async start(controller) {
-        const state: { functionCall: FunctionCall | null } = { functionCall: null };
-
-        const handleChunk = (chunk: EnhancedGenerateContentResponse) => {
-          const calls = chunk.functionCalls();
-          if (calls && calls.length > 0) {
-            state.functionCall = calls[0]; 
-            return true; 
-          }
-          try {
-            const chunkText = chunk.text();
-            if (chunkText) controller.enqueue(new TextEncoder().encode(chunkText));
-          } catch {}
-          return false;
-        };
-
         try {
-          let shouldStop = false;
-          if (firstChunk) shouldStop = handleChunk(firstChunk);
-          
-          if (!shouldStop) {
-            for await (const chunk of streamResult!.stream) {
-              if (handleChunk(chunk)) break;
+          let functionName = "";
+          let functionArgs = "";
+
+          for await (const chunk of stream) {
+            const delta = chunk.choices[0]?.delta;
+            if (delta?.tool_calls) {
+              const toolCall = delta.tool_calls[0];
+              if (toolCall.function?.name) functionName = toolCall.function.name;
+              if (toolCall.function?.arguments) functionArgs += toolCall.function.arguments;
+            } else if (delta?.content) {
+              controller.enqueue(new TextEncoder().encode(delta.content));
             }
           }
 
-          if (state.functionCall && state.functionCall.name === "archive_rules") {
-            const args = state.functionCall.args as { ruleIds: string[] };
+          if (functionName === "archive_rules") {
+            const args = JSON.parse(functionArgs || "{}");
             const ruleIds = args.ruleIds || [];
             let executionMessage = "";
 
@@ -202,15 +142,36 @@ export async function POST(req: Request) {
               executionMessage = `ERROR: Failed to connect to database or invalid IDs provided.`;
             }
 
-            const followUpStream = await successfulChat!.sendMessageStream([{
-              functionResponse: { name: "archive_rules", response: { status: executionMessage } }
-            }]);
+            const toolCallId = "call_" + Math.random().toString(36).substring(7);
 
-            for await (const finalChunk of followUpStream.stream) {
-              try {
-                const text = finalChunk.text();
-                if (text) controller.enqueue(new TextEncoder().encode(text));
-              } catch {}
+            // Call again with tool response
+            allMessages.push({
+              role: "assistant",
+              content: null,
+              tool_calls: [{
+                id: toolCallId,
+                type: "function",
+                function: { name: functionName, arguments: functionArgs }
+              }]
+            });
+            allMessages.push({
+              role: "tool",
+              tool_call_id: toolCallId,
+              content: executionMessage
+            });
+
+            const followUpStream = await openai.chat.completions.create({
+              model: "llama-3.3-70b-versatile",
+              messages: allMessages,
+              temperature: 0,
+              stream: true,
+            });
+
+            for await (const chunk of followUpStream) {
+              const delta = chunk.choices[0]?.delta;
+              if (delta?.content) {
+                controller.enqueue(new TextEncoder().encode(delta.content));
+              }
             }
           }
 
@@ -227,7 +188,7 @@ export async function POST(req: Request) {
       }
     });
 
-    return new Response(stream, {
+    return new Response(readableStream, {
         headers: { "Content-Type": "text/plain; charset=utf-8", "Transfer-Encoding": "chunked" }
     });
 

@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 import { connectToDB } from "@/lib/db";
 import GlobalRule from "@/models/GlobalRule";
-import { GoogleGenerativeAI } from "@google/generative-ai";
 
 export async function POST(req: Request) {
   try {
@@ -11,20 +10,12 @@ export async function POST(req: Request) {
       return new NextResponse("Rule content is required", { status: 400 });
     }
 
-    // 🚀 FIX: Updated to Google's newest required model name
-    const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
-    const model = genAI.getGenerativeModel({ model: "gemini-embedding-001" });
-    
-    // Convert the rule text into 768 mathematical dimensions
-    const result = await model.embedContent(content);
-    const embedding = result.embedding.values;
-
-    // Save the text AND the vector to MongoDB
+    // Save the text to MongoDB
     await connectToDB();
     const newRule = await GlobalRule.create({ 
       content, 
       category: category || "general",
-      embedding 
+      embedding: [] // Disabled embeddings 
     });
 
     return NextResponse.json({ success: true, rule: newRule });

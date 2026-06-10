@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 import { connectToDB } from "@/lib/db";
 import GlobalRule from "@/models/GlobalRule";
-import { GoogleGenerativeAI } from "@google/generative-ai";
 
 // GET: Fetch all rules
 export async function GET() {
@@ -23,21 +22,12 @@ export async function POST(req: Request) {
     const { content, category } = await req.json();
     if (!content) return NextResponse.json({ error: "Rule content is required" }, { status: 400 });
 
-    const apiKey = process.env.GEMINI_API_KEY || process.env.GEMINI_UPDATE_API_KEY;
-    if (!apiKey) {
-      return NextResponse.json({ error: "Server missing Gemini API Key for generating embeddings." }, { status: 500 });
-    }
-
     await connectToDB();
-
-    const embedGenAI = new GoogleGenerativeAI(apiKey);
-    const embedModel = embedGenAI.getGenerativeModel({ model: "gemini-embedding-001" });
-    const embedResult = await embedModel.embedContent(content);
 
     const newRule = await GlobalRule.create({
       content: content.trim(),
       category: category || "manual-injection",
-      embedding: embedResult.embedding.values,
+      embedding: [], // Embeddings disabled as Gemini is removed
       isActive: true,
       isDeleted: false
     });

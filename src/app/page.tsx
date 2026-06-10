@@ -291,6 +291,91 @@ function HomeContent() {
 
   const pendingEdits = useRef<Record<string, string>>({});
   const editorSyncTimer = useRef<NodeJS.Timeout | null>(null);
+  const isCopilotRegistered = useRef(false);
+
+  const handleEditorDidMount = (editor: any, monaco: any) => {
+    monaco.languages.typescript.typescriptDefaults.setCompilerOptions({
+      ...monaco.languages.typescript.typescriptDefaults.getCompilerOptions(),
+      jsx: monaco.languages.typescript.JsxEmit?.React || 2,
+      allowNonTsExtensions: true,
+      target: monaco.languages.typescript.ScriptTarget?.ESNext || 99,
+      moduleResolution: monaco.languages.typescript.ModuleResolutionKind?.NodeJs || 2
+    });
+
+    monaco.languages.typescript.typescriptDefaults.setDiagnosticsOptions({
+      noSemanticValidation: true,
+      noSyntaxValidation: false,
+    });
+
+    if (isCopilotRegistered.current) return;
+    isCopilotRegistered.current = true;
+
+    let debounceTimer: NodeJS.Timeout;
+
+    monaco.languages.registerInlineCompletionsProvider('*', {
+      provideInlineCompletions: async (model: any, position: any, context: any, token: any) => {
+        if (context.triggerKind === 0 /* Invoke */ || context.triggerKind === 1 /* Automatic */) {
+          
+          return new Promise<any>((resolve) => {
+            if (debounceTimer) clearTimeout(debounceTimer);
+            
+            debounceTimer = setTimeout(async () => {
+              if (token.isCancellationRequested) {
+                return resolve({ items: [] });
+              }
+
+              const prefix = model.getValueInRange({
+                startLineNumber: 1,
+                startColumn: 1,
+                endLineNumber: position.lineNumber,
+                endColumn: position.column
+              });
+
+              const suffix = model.getValueInRange({
+                startLineNumber: position.lineNumber,
+                startColumn: position.column,
+                endLineNumber: model.getLineCount(),
+                endColumn: model.getLineMaxColumn(model.getLineCount())
+              });
+
+              if (prefix.trim().length < 5) return resolve({ items: [] });
+
+              try {
+                const res = await fetch('/api/copilot', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ prefix, suffix })
+                });
+                
+                if (!res.ok) return resolve({ items: [] });
+                
+                const data = await res.json();
+                if (data.completion) {
+                  resolve({
+                    items: [{
+                      insertText: data.completion,
+                      range: new monaco.Range(
+                        position.lineNumber,
+                        position.column,
+                        position.lineNumber,
+                        position.column
+                      )
+                    }]
+                  });
+                } else {
+                  resolve({ items: [] });
+                }
+              } catch (err) {
+                resolve({ items: [] });
+              }
+            }, 300);
+          });
+        }
+        return { items: [] };
+      },
+      freeInlineCompletions: () => {}
+    });
+  };
 
   const handleEditorChange = (path: string, content: string) => {
     setFiles(prev => prev ? { ...prev, [path]: content } : null);
@@ -318,6 +403,7 @@ function HomeContent() {
   const [isUploadModalOpen, setIsUploadModalOpen] = useState(false);
   const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false);
   const [overwriteWarningOpen, setOverwriteWarningOpen] = useState(false);
+  const [pendingGenerateOptions, setPendingGenerateOptions] = useState<{ overrideMessages?: Message[], overridePrompt?: string, overrideFramework?: string } | null>(null);
   const [customApiKey, setCustomApiKey] = useState("");
 
   const [history, setHistory] = useState<ChatSession[]>([]);
@@ -445,6 +531,7 @@ function HomeContent() {
   const terminalRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const terminalContainerRef = useRef<HTMLDivElement>(null);
+  const terminalInputRef = useRef<{ dispose: () => void } | null>(null);
 
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const vmRef = useRef<WebContainer | null>(null);
@@ -843,23 +930,35 @@ child.stderr.on('data', data => {
         terminalRef.current.writeln('\x1b[38;2;59;130;246m[Spark AI]\x1b[0m Booting WebContainer environment...');
       }
 
-      const installProcess = await vm.spawn('npm', ['install']);
-      if (terminalRef.current) {
-        installProcess.output.pipeTo(new WritableStream({
-          write(data) { terminalRef.current?.write(data); }
-        }));
-      }
-      await installProcess.exit;
-
-      if (terminalRef.current) {
-        terminalRef.current.writeln('\x1b[38;2;34;197;94m[Spark AI]\x1b[0m Dependencies installed. Starting dev server...');
+      if (terminalInputRef.current) {
+        terminalInputRef.current.dispose();
+        terminalInputRef.current = null;
       }
 
-      const devProcess = await vm.spawn('npm', ['run', 'dev']);
+      const jshProcess = await vm.spawn('jsh', {
+        terminal: {
+          cols: terminalRef.current?.cols || 80,
+          rows: terminalRef.current?.rows || 24,
+        },
+      });
+
       if (terminalRef.current) {
-        devProcess.output.pipeTo(new WritableStream({
-          write(data) { terminalRef.current?.write(data); }
-        }));
+        jshProcess.output.pipeTo(
+          new WritableStream({
+            write(data) {
+              terminalRef.current?.write(data);
+            },
+          })
+        );
+
+        const jshWriter = jshProcess.input.getWriter();
+        
+        terminalInputRef.current = terminalRef.current.onData((data) => {
+          jshWriter.write(data);
+        });
+
+        terminalRef.current.writeln('\x1b[38;2;34;197;94m[Spark AI]\x1b[0m Interactive shell connected. Booting server...');
+        jshWriter.write('npm install && npm run dev\r');
       }
 
     } catch (sdkError) {
@@ -1344,6 +1443,7 @@ child.stderr.on('data', data => {
       const explicitNewProject = /(build|create|generate|develop|start)\s+(?:a\s+|an\s+|the\s+|new\s+|a\s+new\s+|brand\s+new\s+|fresh\s+)?(?:[a-zA-Z0-9_-]+\s+){0,3}(app|project|website|site|platform|dashboard|application|clone|game|portfolio|portal|system)\b/i.test(promptLower);
 
       if (explicitNewProject && !isErrorLog) {
+        setPendingGenerateOptions(options);
         setOverwriteWarningOpen(true);
         return;
       }
@@ -2389,13 +2489,19 @@ child.stderr.on('data', data => {
 
             <div className="space-y-3">
               <button
-                onClick={() => handleGenerate({ skipWarning: true, forceCreate: true })}
+                onClick={() => {
+                  setOverwriteWarningOpen(false);
+                  handleGenerate({ ...(pendingGenerateOptions || {}), skipWarning: true, forceCreate: true });
+                }}
                 className="w-full bg-blue-600 hover:bg-blue-500 text-white font-semibold py-3 rounded-xl flex items-center justify-center gap-2 transition-all shadow-md hover:shadow-blue-500/20 active:scale-[0.98]"
               >
                 <Plus className="w-4 h-4" /> Start Fresh Project (Recommended)
               </button>
               <button
-                onClick={() => handleGenerate({ skipWarning: true, forceCreate: false })}
+                onClick={() => {
+                  setOverwriteWarningOpen(false);
+                  handleGenerate({ ...(pendingGenerateOptions || {}), skipWarning: true, forceCreate: false });
+                }}
                 className="w-full bg-gray-800 hover:bg-gray-700 text-gray-300 hover:text-white font-semibold py-3 rounded-xl flex items-center justify-center gap-2 transition-all active:scale-[0.98] border border-gray-700"
               >
                 <RefreshCw className="w-4 h-4" /> Overwrite Current Code
@@ -2995,6 +3101,7 @@ child.stderr.on('data', data => {
                           defaultLanguage={selectedFile.endsWith('.tsx') || selectedFile.endsWith('.ts') ? 'typescript' : selectedFile.endsWith('.css') ? 'css' : selectedFile.endsWith('.html') ? 'html' : 'json'}
                           value={files[selectedFile]}
                           onChange={(value) => handleEditorChange(selectedFile, value || '')}
+                          onMount={handleEditorDidMount}
                           options={{
                             minimap: { enabled: false },
                             fontSize: 14,
@@ -3005,6 +3112,7 @@ child.stderr.on('data', data => {
                             cursorBlinking: 'smooth',
                             cursorSmoothCaretAnimation: 'on',
                             formatOnPaste: true,
+                            inlineSuggest: { enabled: true },
                           }}
                         />
                       )}

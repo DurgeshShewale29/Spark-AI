@@ -1,12 +1,8 @@
 import { 
-  GoogleGenerativeAI, 
-  HarmCategory, 
-  HarmBlockThreshold, 
   type GenerationConfig,
   type Part,
-  type GenerateContentStreamResult,
   type EnhancedGenerateContentResponse
-} from "@google/generative-ai";
+} from "@google/generative-ai"; // Keeping types for TS compatibility with EnhancedGenerateContentResponse
 import OpenAI from "openai";
 import Anthropic from "@anthropic-ai/sdk";
 import { NextResponse } from "next/server";
@@ -30,8 +26,7 @@ class UniversalAIWrapper {
 
   getGenerativeModel(options: { model: string, generationConfig?: any }) {
     if (this.provider === 'gemini') {
-      const genAI = new GoogleGenerativeAI(this.key);
-      return genAI.getGenerativeModel(options);
+      throw new Error("Gemini provider is disabled. Please use Groq or OpenAI.");
     }
     
     return {
@@ -114,89 +109,10 @@ class UniversalAIWrapper {
 
 
 const MODEL_FALLBACK_LIST = [
-  "gemini-2.5-flash" 
+  "llama-3.3-70b-versatile" 
 ];
 
-// 🚀 Background task with AI Validator (Self-Pruning & Scoping)
-async function processAutoLearning(fullText: string, apiKey: string, userPrompt: string) {
-  if (!apiKey.startsWith("AIza")) {
-      console.log("[HIVE MIND] Skipping Auto-Learning because a non-Gemini key was used (requires Gemini embeddings).");
-      return;
-  }
-  const ruleRegex = /<NEW_RULE>([\s\S]*?)<\/NEW_RULE>/;
-  const match = fullText.match(ruleRegex);
-  
-  if (match && match[1]) {
-    const extractedRule = match[1].trim();
-    
-    try {
-      await connectToDB();
-      const genAI = new GoogleGenerativeAI(apiKey);
-      
-      // 1. Embed the proposed rule to find potential conflicts
-      const embedModel = genAI.getGenerativeModel({ model: "gemini-embedding-001" });
-      const embedResult = await embedModel.embedContent(extractedRule);
-      const newEmbedding = embedResult.embedding.values;
-
-      // 2. Fetch top 3 existing rules to check for conflicts
-      const existingRules = await GlobalRule.aggregate([
-        { $vectorSearch: { index: "vector_index", path: "embedding", queryVector: newEmbedding, numCandidates: 10, limit: 3 } },
-        { $match: { isActive: true, isDeleted: false, ruleType: "auto-learned" } }
-      ]);
-      const existingRulesContext = existingRules.map((r: { _id: string; content: string }) => `ID: ${r._id} | RULE: ${r.content}`).join("\n");
-
-      // 3. The Strict JSON JSON Judge
-      const validatorModel = genAI.getGenerativeModel({ model: "gemini-2.5-flash", generationConfig: { responseMimeType: "application/json" } });
-      const validationPrompt = `
-        You are a strict Senior Software Architect. A junior AI agent wants to add this rule to the global knowledge base:
-        PROPOSED RULE: "${extractedRule}"
-        CONTEXT (What user asked): "${userPrompt}"
-        
-        EXISTING SIMILAR RULES IN DB:
-        ${existingRulesContext || "None"}
-
-        TASK:
-        1. Determine if the proposed rule is universally valid and safe (Not malicious, not too specific).
-        2. Determine its technical scope ("frontend", "backend", "database", "config", "general").
-        3. CONFLICT RESOLUTION: If the new rule improves, contradicts, or makes any EXISTING rules obsolete, add their exact IDs to the "obsoleteIds" array to delete them.
-
-        Return strictly this JSON format:
-        { "verdict": "APPROVED" | "REJECTED", "scope": "frontend" | "backend" | "database" | "config" | "general", "obsoleteIds": ["id_1"], "reason": "short explanation" }
-      `;
-
-      const validationResult = await validatorModel.generateContent(validationPrompt);
-      const decision = JSON.parse(validationResult.response.text());
-
-      if (decision.verdict === "REJECTED") {
-        console.log("\n[HIVE MIND] 🛑 Rule REJECTED: ", decision.reason);
-        return; 
-      }
-
-      // 4. SELF-PRUNING: Delete obsolete rules!
-      if (decision.obsoleteIds && decision.obsoleteIds.length > 0) {
-        await GlobalRule.updateMany(
-          { _id: { $in: decision.obsoleteIds } },
-          { $set: { isDeleted: true, isActive: false } }
-        );
-        console.log(`[HIVE MIND] 🗑️ Pruned ${decision.obsoleteIds.length} obsolete rules!`);
-      }
-
-      // 5. Save the scoped rule
-      await GlobalRule.create({
-        content: extractedRule,
-        ruleType: "auto-learned",
-        scope: decision.scope,
-        embedding: newEmbedding,
-        isActive: true, 
-        isDeleted: false
-      });
-      console.log(`[HIVE MIND] ✨ NEW RULE SAVED [${decision.scope.toUpperCase()}]: `, extractedRule, "\n");
-
-    } catch (err) {
-      console.error("[HIVE MIND] ⚠️ Failed during Auto-Learning process", err);
-    }
-  }
-}
+// Hive Mind disabled due to removal of Gemini embeddings.
 export async function POST(req: Request) {
   console.log("====== API GENERATE HIT ======");
   try {
@@ -208,9 +124,6 @@ export async function POST(req: Request) {
     if (process.env.GEMINI_API_KEY) availableKeys.push(process.env.GEMINI_API_KEY);
     
     for (let i = 1; i <= 20; i++) {
-      const geminiAlt = process.env[`GEMINI_API_KEY_ALT_${i}`];
-      if (geminiAlt) availableKeys.push(geminiAlt);
-      
       const genericAlt = process.env[`API_KEY_ALT_${i}`];
       if (genericAlt) availableKeys.push(genericAlt);
     }
@@ -235,33 +148,9 @@ export async function POST(req: Request) {
       // 1. Fetch Static Project Directives (Always Active)
       const projectRules = await GlobalRule.find({ ruleType: "project-directive", isActive: true, isDeleted: false });
       
-      // 2. Fetch Contextual Auto-Learned Rules (Vector Search)
+      // 2. Disable Contextual Auto-Learned Rules (Requires Gemini Embeddings)
       let learnedRules: any[] = [];
-      const geminiKeyForEmbeddings = API_KEYS.find(k => k.startsWith("AIza"));
-      
-      if (geminiKeyForEmbeddings) {
-        const embedGenAI = new GoogleGenerativeAI(geminiKeyForEmbeddings);
-        const embedModel = embedGenAI.getGenerativeModel({ model: "gemini-embedding-001" });
-        const embedResult = await embedModel.embedContent(latestUserMessage);
-        const promptEmbedding = embedResult.embedding.values;
-
-        learnedRules = await GlobalRule.aggregate([
-          {
-            $vectorSearch: {
-              index: "vector_index",
-              path: "embedding",
-              queryVector: promptEmbedding,
-              numCandidates: 15,
-              limit: 4
-            }
-          },
-          {
-            $match: { isActive: true, isDeleted: false, ruleType: "auto-learned" } 
-          }
-        ]);
-      } else {
-        console.warn("[API] No Gemini key available for embeddings. Skipping contextual auto-learned rules.");
-      }
+      console.warn("[API] Gemini is disabled. Skipping contextual auto-learned rules.");
 
       if (projectRules.length > 0 || learnedRules.length > 0) {
         globalRulesText = `\n\n🧠 HIVE MIND KNOWLEDGE BASE (CRITICAL RELEVANT CONTEXT):
@@ -271,10 +160,7 @@ You MUST strictly obey these architectural rules and past learnings:\n`;
           globalRulesText += `\n[STATIC PROJECT DIRECTIVES]:\n` + projectRules.map((r: { content: string }) => `- ${r.content}`).join("\n");
         }
 
-        if (learnedRules.length > 0) {
-          globalRulesText += `\n[AUTO-LEARNED CONTEXTUAL RULES]:\n` + learnedRules.map((r: { content: string; scope: string }) => `- [${r.scope.toUpperCase()}] ${r.content}`).join("\n");
-        }
-        console.log(`[API] 🧠 Hive Mind Active: ${projectRules.length} Directives, ${learnedRules.length} Learned Rules!`);
+        console.log(`[API] 🧠 Hive Mind Active: ${projectRules.length} Directives, 0 Learned Rules!`);
       }
     } catch (dbErr) {
       console.warn("[API] ⚠️ Failed to perform Vector Search. Skipping Hive Mind.", dbErr);
@@ -299,9 +185,9 @@ You MUST strictly obey these architectural rules and past learnings:\n`;
       2. DEPENDENCIES: Never use "^" or "latest" in package.json. ALWAYS pin exact versions (e.g., "18.2.0") to ensure instant cached installations in WebContainers.
       3. ZERO-BUG DEFENSIVE PROGRAMMING: You MUST write bulletproof code. 
          - Every API route MUST be wrapped in a try/catch block. 
-         - In React, NEVER map over an array without providing a fallback (e.g., \`data?.map() || []\`). 
+         - In React, NEVER map over an array without providing a fallback (e.g., \`(data || []).map()\`). 
          - Always handle loading states and error states in the UI. 
-         - Never assume \`req.json()\` has valid data; always add a fallback.
+         - Never assume \`request.json()\` has valid data; always add a fallback.
 
       🚀 FULL-STACK & BACKEND RULES (CRITICAL FOR WEBCONTAINERS):
       1. NO NATIVE DATABASES: You CANNOT run native database daemons (MongoDB, PostgreSQL, SQLite) inside WebContainers.
@@ -311,7 +197,7 @@ You MUST strictly obey these architectural rules and past learnings:\n`;
       You are streaming your response to the user. You MUST NOT output JSON.
       1. FIRST, write a friendly, concise conversational explanation of what you are building or fixing.
       2. THEN, for EVERY file you need to create or modify, output it using this exact XML structure:
-      <FILE_START path="/src/app/page.tsx">
+      <FILE_START path="/app/page.tsx">
       [ENTIRE FILE CONTENT HERE]
       </FILE_END>
 
@@ -334,37 +220,147 @@ You MUST strictly obey these architectural rules and past learnings:\n`;
 
     if (framework === "nextjs") {
       systemPromptBase += `
-      NEXT.JS FULL-STACK RULES (CRITICAL):
-      1. CORE ARCHITECTURE: You MUST generate a complete full-stack app. This includes the frontend UI ("/app/page.tsx"), the database state ("/lib/db.ts"), and the backend API ("/app/api/[route]/route.ts").
-      2. THE DATABASE: Because this runs in a WebContainer, YOU CANNOT use Postgres, Prisma, or MongoDB. You MUST create a "/lib/db.ts" file that exports an in-memory array/object (e.g., \`let items = []; export const db = { getItems: () => items, addItem: (item) => items.push(item) }\`) to act as the persistent database while the server runs.
-      3. THE API: You MUST create standard Next.js App Router API endpoints (GET, POST, PUT, DELETE) inside "/app/api/.../route.ts" files. These API routes must import and modify the data in "/lib/db.ts".
-      4. THE FRONTEND: "/app/page.tsx" MUST use standard \`fetch('/api/...')\` calls inside \`useEffect\` or event handlers to interact with your backend API. Never hardcode data in the frontend if a backend API is requested.
-      5. NO LAYOUT: Do not generate "/app/layout.tsx". My system handles the layout safely. Focus entirely on the page, the API, and the DB.
-      6. REACT HOOKS: Put "use client"; at the very top of "/app/page.tsx".
-      7. STACKBLITZ SAFE: Include standard tailwind.config.js and postcss.config.js. Use lucide-react for icons.
-      8. SECRET HANDLING & ENV VARIABLES (CRITICAL): 
-         If the user provides an API key, Database URL (like MongoDB), or any secret token in their prompt, YOU MUST NEVER hardcode it into the application code (like /lib/db.ts). 
-         Instead, you MUST create a "/.env" file and place the secrets there. 
-         Then, ensure your application code references them securely using \`process.env.YOUR_VARIABLE_NAME\`.
+      NEXT.JS 14 APP ROUTER RULES (CRITICAL — READ EVERY LINE):
+
+      === EXACT DIRECTORY TREE YOU MUST GENERATE ===
+      /app/page.tsx          <- Main UI ("use client" at top)
+      /app/api/xxx/route.ts  <- API endpoints (one per feature)
+      /lib/db.ts             <- In-memory database with mock data
+      /components/xxx.tsx    <- Reusable UI components (optional)
+      /package.json          <- ONLY include extra dependencies the user needs
+
+      === FILES OUR SYSTEM AUTO-GENERATES (DO NOT CREATE THESE) ===
+      Our build system automatically injects these with correct settings.
+      If you generate them, they will be DELETED and replaced. Save your tokens:
+      - /tailwind.config.js  (auto-injected)
+      - /postcss.config.js   (auto-injected)
+      - /tsconfig.json       (auto-injected with @/* path alias)
+      - /next.config.js      (auto-injected)
+      - /app/layout.tsx      (auto-injected)
+      - /app/globals.css     (auto-injected)
+
+      === BANNED PATHS (NEVER GENERATE THESE) ===
+      NEVER use /src/ directory. EVER. All paths start from root /.
+      NEVER use /pages/ directory. EVER. We use App Router only.
+
+      === 1. DATABASE TEMPLATE (/lib/db.ts) ===
+      You MUST create /lib/db.ts as an in-memory store. NO Postgres, Prisma, MongoDB, or SQLite.
+      Pre-fill with 5-10 realistic mock items so the UI looks alive instantly.
+      Example:
+      \`\`\`
+      // /lib/db.ts
+      export const db = {
+        users: [
+          { id: '1', name: 'Sarah Chen', email: 'sarah@example.com', avatar: 'https://i.pravatar.cc/150?u=sarah' },
+          { id: '2', name: 'Alex Rivera', email: 'alex@example.com', avatar: 'https://i.pravatar.cc/150?u=alex' },
+        ],
+        // ... more collections as needed
+      };
+      \`\`\`
+
+      === 2. API ROUTE TEMPLATE (/app/api/xxx/route.ts) ===
+      You MUST use Next.js App Router syntax. NEVER use NextApiRequest/NextApiResponse.
+      \`\`\`
+      // /app/api/users/route.ts
+      import { NextResponse } from 'next/server';
+      import { db } from '@/lib/db';
+
+      export async function GET() {
+        return NextResponse.json(db.users);
+      }
+
+      export async function POST(request: Request) {
+        try {
+          const body = await request.json();
+          const newUser = { id: Date.now().toString(), ...body };
+          db.users.push(newUser);
+          return NextResponse.json(newUser, { status: 201 });
+        } catch (error) {
+          return NextResponse.json({ error: 'Invalid request' }, { status: 400 });
+        }
+      }
+      \`\`\`
+      CRITICAL: Use \`import { db } from '@/lib/db';\` (the @ alias). This works because our tsconfig.json maps "@/*" to the project root.
+
+      === 3. FRONTEND TEMPLATE (/app/page.tsx) ===
+      \`\`\`
+      'use client';
+      import { useState, useEffect } from 'react';
+      import { Home, Search, Bell } from 'lucide-react'; // NAMED icons only!
+
+      export default function Page() {
+        const [data, setData] = useState<any[]>([]);
+        const [loading, setLoading] = useState(true);
+
+        useEffect(() => {
+          fetch('/api/users')
+            .then(res => res.json())
+            .then(setData)
+            .catch(console.error)
+            .finally(() => setLoading(false));
+        }, []);
+
+        if (loading) return <div className="flex items-center justify-center h-screen"><div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500" /></div>;
+
+        return ( /* your UI here */ );
+      }
+      \`\`\`
+      CRITICAL: fetch() is a GLOBAL browser API. NEVER import it from any library.
+
+      === 4. BANNED IMPORTS (WILL CRASH THE APP) ===
+      These imports DO NOT EXIST in our environment and will cause Module not found errors:
+      - import fetch from 'node-fetch' -> DELETE (fetch is a global browser API)
+      - import fetch from 'isomorphic-fetch' -> DELETE (fetch is a global browser API)
+      - import fetch from 'cross-fetch' -> DELETE (fetch is a global browser API)
+      - import { Icon } from 'lucide-react' -> Use NAMED icons: import { Home, User } from 'lucide-react'
+      - import { NextApiRequest, NextApiResponse } from 'next' -> Use: import { NextResponse } from 'next/server'
+      - import from 'fs', 'path', 'child_process', 'crypto' -> DELETE (Node.js built-ins)
+      - import Image from 'next/image' -> Use standard <img> tag instead
+      - import from 'next/font' -> DELETE (Google Fonts don't load in WebContainers)
+      - import { useRouter } from 'next/navigation' -> DELETE (single-page app, no routing)
+      - 'use server' directive -> DELETE (server actions not supported)
+      
+      CORRECT IMPORTS:
+      - fetch('/api/...') is a global browser API, just call it directly
+      - import { NextResponse } from 'next/server' for API routes
+      - import { Home, Settings, User } from 'lucide-react' for icons
+      - <img src="url" alt="" className="..." /> for images
+
+      === 5. PACKAGE.JSON RULES ===
+      - Pin EXACT versions. No ^ or ~ or "latest".
+      - Our build system auto-merges your dependencies with the base framework deps (next, react, react-dom, lucide-react, tailwindcss, typescript are already included).
+      - You only need to add EXTRA dependencies the user's app specifically needs (e.g., "framer-motion": "11.0.0", "recharts": "2.12.0", "date-fns": "3.3.1").
+      - The "scripts" must be: { "dev": "next dev", "build": "next build" }
+
+      === 6. CONFIG FILES ===
+      DO NOT generate tailwind.config.js, postcss.config.js, tsconfig.json, next.config.js, layout.tsx, or globals.css.
+      Our system auto-injects them with correct settings including the @/* path alias.
+      Just use import { db } from '@/lib/db' in your code and it will work.
+
+      === 7. SECRET HANDLING ===
+      If the user provides API keys or secrets, create a /.env file. Reference via process.env.VARIABLE_NAME.
+      NEVER hardcode secrets in source code.
       `;
     } else if (framework === "react-vite") {
       systemPromptBase += `
       REACT VITE RULES:
-      1. CORE: Generate "/index.html", "/src/main.tsx", "/src/App.tsx", "/package.json", "/tailwind.config.js", and "/postcss.config.js".
+      1. CORE: Generate "/index.html", "/src/main.tsx", "/src/App.tsx", "/package.json", "/tailwind.config.js", "/postcss.config.js", and "/vite.config.ts".
       2. HTML ENTRY: Must contain <div id="root"></div> and <script type="module" src="/src/main.tsx"></script>.
       3. CONFIG SYNTAX: Must use ES Module syntax. NEVER use module.exports.
+      4. VITE CONFIG: You MUST generate "/vite.config.ts" using \`@vitejs/plugin-react\`.
       `;
     } else if (framework === "vue-vite") {
       systemPromptBase += `
       VUE 3 VITE RULES:
-      1. CORE: Generate "/index.html", "/src/main.ts", "/src/App.vue", "/package.json", "/tailwind.config.js", and "/postcss.config.js".
+      1. CORE: Generate "/index.html", "/src/main.ts", "/src/App.vue", "/package.json", "/tailwind.config.js", "/postcss.config.js", and "/vite.config.ts".
       2. VUE MOUNT: call createApp(App).mount('#app').
       3. CONFIG SYNTAX: Must use ES Module syntax. NEVER use module.exports.
+      4. VITE CONFIG: You MUST generate "/vite.config.ts" using \`@vitejs/plugin-vue\`.
       `;
     } else if (framework === "angular") {
       systemPromptBase += `
       ANGULAR 17+ RULES:
-      1. CORE: Generate "/src/index.html", "/src/main.ts", "/src/app/app.component.ts", "/src/app/app.component.html", "/src/styles.css", and "/package.json".
+      1. CORE: Generate "/src/index.html", "/src/main.ts", "/src/app/app.component.ts", "/src/app/app.component.html", "/src/styles.css", "/package.json", "/angular.json", and "/tsconfig.json".
       2. BOOTSTRAP: bootstrapApplication(AppComponent).
       `;
     } else if (framework === "vanilla-vite") {
@@ -394,7 +390,8 @@ You MUST strictly obey these architectural rules and past learnings:\n`;
       optimizedFiles = {};
       
       const alwaysInclude = new Set([
-        "/package.json", "/tailwind.config.js", "/next.config.js", "/postcss.config.js", "package.json", "tailwind.config.js"
+        "/package.json", "/tailwind.config.js", "/next.config.js", "/postcss.config.js", "/tsconfig.json",
+        "package.json", "tailwind.config.js", "tsconfig.json", "postcss.config.js", "next.config.js"
       ]);
 
       allPaths.forEach(path => {
@@ -405,7 +402,7 @@ You MUST strictly obey these architectural rules and past learnings:\n`;
         }
         
         // 2. Always include the Backend Contract (Zero Hallucination Rule)
-        if (path.includes('/api/') || path.includes('/lib/db') || path.includes('/types') || path.includes('/models')) {
+        if (path.includes('/api/') || path.includes('/lib/db') || path.includes('/lib/') || path.includes('/types') || path.includes('/models') || path.includes('/components/')) {
           optimizedFiles[path] = currentFiles[path];
           return;
         }
@@ -445,7 +442,7 @@ RULES:
 3. THE <UPDATE> FALLBACK: ONLY use <UPDATE path="/path"> with <REPLACE start="X" end="Y"> if the file is MASSIVE (300+ lines).
 4. ORPHANED FILE DELETION (CRITICAL): If you rename a file, refactor a component out of existence, or a file is no longer needed, you MUST delete it to prevent compiler crashes. Use exactly: <DELETE path="/path/to/old/file.ts" />
 5. AUTO-LEARNING: If fixing an error, output: <NEW_RULE>When doing X, ensure Y to prevent Z.</NEW_RULE>`
-      : `${systemPromptBase}\n\nCREATE MODE: Empty workspace.\n\nCONVERSATION:\n${conversationTranscript}\n\nINSTRUCTION:\n1. You MUST generate a complete full-stack application for the user.\n2. For EVERY single file you generate, you MUST output it using this exact XML format:\n<FILE_START path="/path/to/file">\n[content]\n</FILE_END>\n3. DO NOT use standard markdown code blocks to output project files.`;
+      : `${systemPromptBase}\n\nCREATE MODE: Empty workspace. You are building from scratch.\n\nCONVERSATION:\n${conversationTranscript}\n\nINSTRUCTION:\n1. You MUST generate a complete full-stack application for the user.\n2. For EVERY single file you generate, you MUST output it using this exact XML format:\n<FILE_START path="/path/to/file">\n[content]\n</FILE_END>\n3. DO NOT use standard markdown code blocks to output project files.\n4. The main page MUST be at /app/page.tsx (NOT /src/app/page.tsx).\n5. API routes MUST be at /app/api/[name]/route.ts.\n6. Database MUST be at /lib/db.ts with pre-filled mock data.\n7. You MUST generate package.json, tailwind.config.js, postcss.config.js, and tsconfig.json.`;
 
     // 🚀 4. THE MULTI-AGENT PIPELINE (With Intelligent Router)
     let streamResult: any = null;
@@ -459,7 +456,7 @@ RULES:
 
       try {
         // 🚀 AGENT 1: THE INTELLIGENT ROUTER (Scope & Intent Detection)
-        const architectModel = genAI.getGenerativeModel({ model: "gemini-2.5-flash", generationConfig: { responseMimeType: "application/json" } });
+        const architectModel = genAI.getGenerativeModel({ model: "llama-3.3-70b-versatile", generationConfig: { responseMimeType: "application/json" } });
         const architectPrompt = `You are the Lead Architect routing a task. 
         User Task: "${latestUserMessage}"
         Is Update Mode: ${isUpdateMode}
@@ -491,7 +488,7 @@ RULES:
         // 🚀 FORCED OVERRIDE: If it's a new project, NEVER allow conversation mode.
         if (!isUpdateMode) plan.scope = "fullstack";
 
-        const mainModel = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+        const mainModel = genAI.getGenerativeModel({ model: "llama-3.3-70b-versatile" });
 
         // 🚀 THE CONVERSATIONAL FAST-TRACK (Bypass Multi-Agent Pipeline)
         if (plan.scope === "conversation") {
@@ -517,7 +514,18 @@ RULES:
 
         // AGENT 2: BACKEND (Runs if fullstack or backend_only)
         if (plan.scope === "backend_only" || plan.scope === "fullstack") {
-           const backendResult = await mainModel.generateContent(`${finalPromptText} \n PLAN: ${JSON.stringify(plan)} \n FOCUS: Generate ONLY the logic in /app/api/ routes, /types, and /lib/db.ts. Use defensive programming.`);
+           const backendResult = await mainModel.generateContent(`${finalPromptText} \n PLAN: ${JSON.stringify(plan)} \n
+           FOCUS: Generate ONLY the backend files:
+           - /lib/db.ts (in-memory database with realistic mock data)
+           - /app/api/[feature]/route.ts (one route file per feature)
+           
+           MANDATORY PATTERNS:
+           - Use \`import { NextResponse } from 'next/server';\` in every route file.
+           - Use \`import { db } from '@/lib/db';\` to access the database.
+           - Export named async functions: GET, POST, PUT, DELETE.
+           - Wrap every handler in try/catch. Return NextResponse.json() for all responses.
+           - NEVER use NextApiRequest, NextApiResponse, or req.query. Use \`request.json()\` for body and \`new URL(request.url).searchParams\` for query params.
+           `);
            backendGeneratedCode = backendResult.response.text();
            backendContext = backendGeneratedCode;
         } else {
@@ -532,7 +540,36 @@ RULES:
             const frontendPromptParts: Array<string | Part> = [
               `${finalPromptText} \n PLAN: ${JSON.stringify(plan)} 
               🛑 STRICT BACKEND CONTRACT (DO NOT MODIFY THESE): \n${backendContext}\n
-              FOCUS: Generate ONLY the UI and components. Your fetch() calls MUST match the Backend Contract.`
+
+              MASTER UI/UX DESIGNER DIRECTIVE:
+              You are an elite Senior Frontend Developer and UI/UX Designer.
+              Generate ONLY the frontend files: /app/page.tsx and /components/*.tsx.
+
+              === CRITICAL RULES ===
+              1. FILE PATH: Write the main UI into EXACTLY "/app/page.tsx". NEVER use /src/ or /pages/.
+              2. FIRST LINE: The very first line of /app/page.tsx MUST be: 'use client';
+              3. IMPORTS: import { useState, useEffect } from 'react'; import specific lucide-react icons like { Home, User, Settings, Search, Bell, Menu, X, ChevronDown, Plus, Trash2, Edit, Check, BarChart3, TrendingUp, DollarSign, Users, Activity, ArrowUpRight, ArrowDownRight, Eye, MessageSquare, Heart, Star, ShoppingCart, Package, Clock, Calendar, Mail, Phone, MapPin, Globe, Shield, Zap, Award, Target, Layers, Grid, List }.
+              4. FETCH: Call fetch('/api/...') directly. It is a GLOBAL browser API. NEVER import it.
+              5. LOADING STATE: Always show an animated spinner while data loads.
+              6. ERROR STATE: Always wrap fetch in try/catch and show a user-friendly error message.
+
+              === PREMIUM DESIGN SYSTEM ===
+              You MUST make the UI look like a premium SaaS product, not a student project.
+              - COLOR PALETTE: Use a cohesive dark theme (bg-gray-950, bg-gray-900) with vibrant accent colors (blue-500, purple-500, emerald-500). No plain white backgrounds.
+              - TYPOGRAPHY: Use font-bold and text-xl/2xl/3xl for headings. Use text-gray-400 for secondary text. Proper hierarchy.
+              - CARDS: Use bg-gray-900/50 backdrop-blur-xl border border-gray-800/50 rounded-2xl p-6 shadow-xl for card containers.
+              - GLASSMORPHISM: Use backdrop-blur-xl bg-white/5 border border-white/10 for glass effects.
+              - GRADIENTS: Use bg-gradient-to-br from-blue-500 to-purple-600 for accent backgrounds and buttons.
+              - HOVER STATES: Every clickable element MUST have hover:scale-[1.02] transition-all duration-300 hover:shadow-lg.
+              - ICONS: Place lucide-react icons inside colored rounded-xl bg-blue-500/10 p-3 containers for visual hierarchy.
+              - SPACING: Use generous padding (p-6, p-8) and gaps (gap-6). Never cramped.
+              - RESPONSIVE: Use grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 for card grids.
+              - SIDEBAR: If a sidebar is needed, use w-64 bg-gray-950 border-r border-gray-800 with nav items using rounded-xl hover:bg-gray-800/50.
+              - STAT CARDS: Display key numbers in text-3xl font-bold with colored trend indicators (text-emerald-400 for positive, text-red-400 for negative).
+              - TABLES: Use divide-y divide-gray-800 with hover:bg-gray-800/30 row highlights.
+              - AVATARS: Use rounded-full with ring-2 ring-gray-800 borders.
+              - EMPTY STATES: If no data, show a centered icon + message, never a blank page.
+              `
             ];
             // Image handling
             if (attachedImages && Array.isArray(attachedImages) && attachedImages.length > 0) {
@@ -552,21 +589,63 @@ RULES:
         // AGENT 4: THE COMPILER PASS (Only reviews newly generated code to save tokens)
         const newlyGeneratedCode = backendGeneratedCode + "\n" + frontendGeneratedCode;
         
-        const reviewerPrompt = `You are the Ultimate Code Compiler and Senior Reviewer. 
-        Audit this newly generated code for syntax errors:
-        ${newlyGeneratedCode}
+        const reviewerPrompt = `You are the Ultimate Code Compiler and Senior Code Reviewer.
+        Your job is to audit, fix, and finalize this generated code.
         
-        YOUR DIRECTIVE:
-        1. Fix any duplicate variables, missing brackets, or syntax errors.
-        2. CRITICAL XML ENFORCEMENT: You MUST wrap EVERY SINGLE FILE in exact XML tags. 
-           Example:
-           <FILE_START path="/src/App.jsx">
-           // code here
+        IMPORTANT: The code below was generated by two separate AI agents (Backend + Frontend).
+        It may contain duplicate explanations, markdown text, or FILE_START tags from both agents.
+        You must MERGE and DEDUPLICATE all files into a single clean output.
+
+        === RAW GENERATED CODE ===
+        ${newlyGeneratedCode}
+
+        === YOUR DIRECTIVE ===
+
+        STEP 1 - IMPORT VALIDATION (CRITICAL):
+        Scan every file and REMOVE these banned imports:
+        - import fetch from 'node-fetch' / 'isomorphic-fetch' / 'cross-fetch' -> DELETE (fetch is global)
+        - import { Icon } from 'lucide-react' -> Replace with specific named icons like { Home, User, Settings }
+        - import { NextApiRequest, NextApiResponse } from 'next' -> Replace with: import { NextResponse } from 'next/server'
+        - import from 'fs', 'path', 'crypto', 'child_process' -> DELETE (Node.js built-ins)
+        - import Image from 'next/image' -> Replace with standard <img> tag
+        - import from 'next/font' -> DELETE
+        - 'use server' directive -> DELETE
+
+        STEP 2 - PATH VALIDATION:
+        - All file paths MUST start with / (root), NEVER with /src/
+        - If you see /src/app/page.tsx -> change path to /app/page.tsx
+        - If you see /src/lib/db.ts -> change path to /lib/db.ts
+        - If you see /src/components/ -> change path to /components/
+        - Main page MUST be at path /app/page.tsx
+        - API routes MUST be at path /app/api/[name]/route.ts
+        - Database MUST be at path /lib/db.ts
+        - If any file uses ../../lib/db or ../../../lib/db in imports, change to @/lib/db
+        - DO NOT output these files (our system auto-injects them): tailwind.config.js, postcss.config.js, tsconfig.json, next.config.js, app/layout.tsx, app/globals.css
+
+        STEP 3 - SYNTAX FIXES:
+        - Fix duplicate variable declarations
+        - Fix missing closing brackets, parentheses, or JSX tags
+        - Ensure every React component has a proper default export
+        - Ensure 'use client'; is the FIRST line of /app/page.tsx (before any imports)
+        - Ensure all arrays are safely accessed with (data || []).map()
+
+        STEP 4 - API ROUTE VALIDATION:
+        - Every /app/api/*/route.ts MUST export named async functions (GET, POST, etc.), NOT default exports
+        - Every route MUST use NextResponse.json(), NOT res.json() or res.send()
+        - Every route MUST import { NextResponse } from 'next/server'
+        - Every route MUST import { db } from '@/lib/db'
+        - Every route MUST have try/catch error handling
+
+        STEP 5 - OUTPUT FORMAT:
+        A. FIRST: Write a brief, friendly explanation of what was built (2-3 sentences max).
+        B. THEN: Provide 2-3 "Pro Prompt" suggestions as bullet points for what to build next.
+        C. FINALLY: Output EVERY file wrapped in exact XML tags:
+           <FILE_START path="/app/page.tsx">
+           // full corrected file content here
            </FILE_END>
-           DO NOT use standard markdown code blocks (like \`\`\`javascript). You MUST use <FILE_START path="..."> instead!
-        3. UX & EDUCATION (CRITICAL): Before outputting the XML, write a brief, friendly explanation of what you built.
-        4. PROMPT SUGGESTIONS: Provide 2-3 advanced "Pro Prompts" as bullet points.
-        5. Output the explanation and suggestions FIRST, then output the XML blocks.`;
+           DO NOT use markdown code blocks. You MUST use <FILE_START path="..."> tags ONLY.
+           DO NOT output config files (tailwind.config.js, postcss.config.js, tsconfig.json, next.config.js, layout.tsx, globals.css).
+        `;
 
         streamResult = await mainModel.generateContentStream(reviewerPrompt);
         
@@ -621,12 +700,6 @@ RULES:
           controller.error(err);
         } finally {
           controller.close(); 
-          
-          if (isUpdateMode && successfulKey) {
-             processAutoLearning(fullText, successfulKey, latestUserMessage).catch(err => {
-                 console.error("[HIVE MIND] Background task failed:", err);
-             });
-          }
         }
       }
     });
