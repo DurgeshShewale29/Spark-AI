@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Space_Grotesk } from "next/font/google"; 
 import { ClerkProvider } from "@clerk/nextjs";
+import { Analytics } from "@vercel/analytics/next";
 import "./globals.css"; 
 
 const spaceGrotesk = Space_Grotesk({ subsets: ["latin"] });
@@ -19,7 +20,10 @@ export default function RootLayout({
     <ClerkProvider>
       <html lang="en">
         {/* 3. We apply it to the body here */}
-        <body className={spaceGrotesk.className}>{children}</body>
+        <body className={spaceGrotesk.className}>
+          {children}
+          <Analytics />
+        </body>
       </html>
     </ClerkProvider>
   );

@@ -1,10 +1,9 @@
-import { 
+import {
   type GenerationConfig,
   type Part,
   type EnhancedGenerateContentResponse
 } from "@google/generative-ai"; // Keeping types for TS compatibility with EnhancedGenerateContentResponse
 import OpenAI from "openai";
-import Anthropic from "@anthropic-ai/sdk";
 import { NextResponse } from "next/server";
 import { connectToDB } from "@/lib/db";
 import GlobalRule from "@/models/GlobalRule";
@@ -13,95 +12,53 @@ export const maxDuration = 300; // 300 seconds (max for Vercel Pro tier)
 
 class UniversalAIWrapper {
   private key: string;
-  private provider: 'gemini' | 'openai' | 'anthropic' | 'groq';
 
   constructor(key: string) {
     this.key = key ? key.trim() : "";
-    if (this.key.startsWith('AIza')) this.provider = 'gemini';
-    else if (this.key.startsWith('gsk_')) this.provider = 'groq';
-    else if (this.key.startsWith('sk-ant-')) this.provider = 'anthropic';
-    else if (this.key.startsWith('sk-')) this.provider = 'openai';
-    else this.provider = 'gemini'; // fallback
   }
 
   getGenerativeModel(options: { model: string, generationConfig?: any }) {
-    if (this.provider === 'gemini') {
-      throw new Error("Gemini provider is disabled. Please use Groq or OpenAI.");
-    }
-    
     return {
       generateContent: async (promptParts: any) => {
-        let text = Array.isArray(promptParts) 
-          ? promptParts.map((p: any) => (typeof p === 'string' ? p : p?.inlineData ? '[Image omitted for non-Gemini provider]' : '')).join('\n') 
+        let text = Array.isArray(promptParts)
+          ? promptParts.map((p: any) => (typeof p === 'string' ? p : p?.inlineData ? '[Image omitted for non-Gemini provider]' : '')).join('\n')
           : String(promptParts);
 
-        if (this.provider === 'anthropic') {
-          const anthropic = new Anthropic({ apiKey: this.key });
-          const res = await anthropic.messages.create({
-            model: "claude-3-5-sonnet-latest",
-            max_tokens: 8192,
-            messages: [{ role: "user", content: text }]
-          });
-          const msg = res.content.find((c: any) => c.type === 'text');
-          return { response: { text: () => msg ? (msg as any).text : "" } };
-        } else {
-          const isGroq = this.provider === 'groq';
-          const openai = new OpenAI({ 
-            apiKey: this.key, 
-            baseURL: isGroq ? 'https://api.groq.com/openai/v1' : undefined 
-          });
-          const res = await openai.chat.completions.create({
-            model: isGroq ? "llama-3.3-70b-versatile" : "gpt-4o",
-            messages: [{ role: "user", content: text }],
-            response_format: options.generationConfig?.responseMimeType === "application/json" ? { type: "json_object" } : undefined
-          });
-          return { response: { text: () => res.choices[0].message.content || "" } };
-        }
+        const openai = new OpenAI({
+          apiKey: this.key,
+          baseURL: 'https://api.groq.com/openai/v1'
+        });
+        const res = await openai.chat.completions.create({
+          model: "llama-3.3-70b-versatile",
+          messages: [{ role: "user", content: text }],
+          response_format: options.generationConfig?.responseMimeType === "application/json" ? { type: "json_object" } : undefined
+        });
+        return { response: { text: () => res.choices[0].message.content || "" } };
       },
       generateContentStream: async (promptParts: any) => {
-        let text = Array.isArray(promptParts) 
-          ? promptParts.map((p: any) => (typeof p === 'string' ? p : p?.inlineData ? '[Image omitted for non-Gemini provider]' : '')).join('\n') 
+        let text = Array.isArray(promptParts)
+          ? promptParts.map((p: any) => (typeof p === 'string' ? p : p?.inlineData ? '[Image omitted for non-Gemini provider]' : '')).join('\n')
           : String(promptParts);
 
-        if (this.provider === 'anthropic') {
-          const anthropic = new Anthropic({ apiKey: this.key });
-          const stream = await anthropic.messages.create({
-            model: "claude-3-5-sonnet-latest",
-            max_tokens: 8192,
-            messages: [{ role: "user", content: text }],
-            stream: true
-          });
+        const openai = new OpenAI({
+          apiKey: this.key,
+          baseURL: 'https://api.groq.com/openai/v1'
+        });
+        const stream = await openai.chat.completions.create({
+          model: "llama-3.3-70b-versatile",
+          messages: [{ role: "user", content: text }],
+          stream: true
+        });
 
-          async function* generate() {
-            for await (const chunk of stream) {
-              if (chunk.type === 'content_block_delta' && chunk.delta.type === 'text_delta') {
-                yield { text: () => (chunk.delta as any).text };
-              }
+        async function* generate() {
+          for await (const chunk of stream) {
+            const content = chunk.choices[0]?.delta?.content || "";
+            if (content) {
+              yield { text: () => content };
             }
           }
-          return { stream: generate() };
-        } else {
-          const isGroq = this.provider === 'groq';
-          const openai = new OpenAI({ 
-            apiKey: this.key, 
-            baseURL: isGroq ? 'https://api.groq.com/openai/v1' : undefined 
-          });
-          const stream = await openai.chat.completions.create({
-            model: isGroq ? "llama-3.3-70b-versatile" : "gpt-4o",
-            messages: [{ role: "user", content: text }],
-            stream: true
-          });
-
-          async function* generate() {
-            for await (const chunk of stream) {
-              const content = chunk.choices[0]?.delta?.content || "";
-              if (content) {
-                yield { text: () => content };
-              }
-            }
-          }
-          return { stream: generate() };
         }
+        return { stream: generate() };
       }
     };
   }
@@ -109,7 +66,7 @@ class UniversalAIWrapper {
 
 
 const MODEL_FALLBACK_LIST = [
-  "llama-3.3-70b-versatile" 
+  "llama-3.3-70b-versatile"
 ];
 
 // Hive Mind disabled due to removal of Gemini embeddings.
@@ -121,19 +78,19 @@ export async function POST(req: Request) {
 
     // 🚀 Dynamic 20-Key Load Balancer
     let availableKeys: string[] = [];
-    if (process.env.GEMINI_API_KEY) availableKeys.push(process.env.GEMINI_API_KEY);
-    
+    if (process.env.GROQ_API_KEY) availableKeys.push(process.env.GROQ_API_KEY);
+
     for (let i = 1; i <= 20; i++) {
       const genericAlt = process.env[`API_KEY_ALT_${i}`];
       if (genericAlt) availableKeys.push(genericAlt);
     }
-    
+
     availableKeys = availableKeys.sort(() => Math.random() - 0.5);
     const API_KEYS = customApiKey ? [customApiKey, ...availableKeys] : availableKeys;
 
     if (API_KEYS.length === 0) {
       return NextResponse.json(
-        { error: `API Keys missing. Please set GEMINI_API_KEY in your .env variables or add a custom key in settings.` }, 
+        { error: `API Keys missing. Please set GROQ_API_KEY in your .env variables or add a custom key in settings.` },
         { status: 500 }
       );
     }
@@ -144,10 +101,10 @@ export async function POST(req: Request) {
     let globalRulesText = "";
     try {
       await connectToDB();
-      
+
       // 1. Fetch Static Project Directives (Always Active)
       const projectRules = await GlobalRule.find({ ruleType: "project-directive", isActive: true, isDeleted: false });
-      
+
       // 2. Disable Contextual Auto-Learned Rules (Requires Gemini Embeddings)
       let learnedRules: any[] = [];
       console.warn("[API] Gemini is disabled. Skipping contextual auto-learned rules.");
@@ -376,7 +333,7 @@ You MUST strictly obey these architectural rules and past learnings:\n`;
       // Only keep the last 5 messages. The AI doesn't need to remember a typo from an hour ago.
       const recentMessages = messages.slice(-5);
       conversationTranscript = recentMessages
-        .map((m: {role: string, content: string}) => `${m.role === 'user' ? 'USER' : 'ASSISTANT'}: ${m.content}`)
+        .map((m: { role: string, content: string }) => `${m.role === 'user' ? 'USER' : 'ASSISTANT'}: ${m.content}`)
         .join('\n\n');
     }
 
@@ -384,11 +341,11 @@ You MUST strictly obey these architectural rules and past learnings:\n`;
     // We abandon the flaky "AI guessing" RAG. Gemini 2.5 has a 1M token window.
     // Instead, we use deterministic rules to guarantee the Backend Contract is always read.
     let optimizedFiles = currentFiles;
-    
+
     if (isUpdateMode && currentFiles) {
       const allPaths = Object.keys(currentFiles);
       optimizedFiles = {};
-      
+
       const alwaysInclude = new Set([
         "/package.json", "/tailwind.config.js", "/next.config.js", "/postcss.config.js", "/tsconfig.json",
         "package.json", "tailwind.config.js", "tsconfig.json", "postcss.config.js", "next.config.js"
@@ -400,7 +357,7 @@ You MUST strictly obey these architectural rules and past learnings:\n`;
           optimizedFiles[path] = currentFiles[path];
           return;
         }
-        
+
         // 2. Always include the Backend Contract (Zero Hallucination Rule)
         if (path.includes('/api/') || path.includes('/lib/db') || path.includes('/lib/') || path.includes('/types') || path.includes('/models') || path.includes('/components/')) {
           optimizedFiles[path] = currentFiles[path];
@@ -410,8 +367,8 @@ You MUST strictly obey these architectural rules and past learnings:\n`;
         // 3. Always include explicitly tagged files (e.g., @page.tsx)
         const isTagged = taggedFiles && taggedFiles.some((t: string) => path.includes(t.replace(/^@/, '').replace(/^\//, '')));
         if (isTagged) {
-           optimizedFiles[path] = currentFiles[path];
-           return;
+          optimizedFiles[path] = currentFiles[path];
+          return;
         }
 
         // 4. For standard UI components, include them unless the codebase is massive (>20 files).
@@ -420,11 +377,11 @@ You MUST strictly obey these architectural rules and past learnings:\n`;
           optimizedFiles[path] = currentFiles[path];
         }
       });
-      
+
       console.log(`[CONTEXT ENGINE] Passed ${Object.keys(optimizedFiles).length} critical files to Agent.`);
     }
 
-    const finalPromptText = isUpdateMode 
+    const finalPromptText = isUpdateMode
       ? `${systemPromptBase}
       
 UPDATE MODE: You are modifying an existing project.
@@ -472,7 +429,7 @@ RULES:
 
         Return strictly this JSON object:
         { "scope": "conversation" | "frontend_only" | "backend_only" | "fullstack", "filesToModify": ["/path1"], "plan": "1-sentence strategy" }`;
-        
+
         const planResponse = await architectModel.generateContent(architectPrompt);
         // 🚀 FIX: Bulletproof JSON parsing. If the AI rebels and outputs raw text, default to fullstack.
         let plan = { scope: "fullstack", filesToModify: [], plan: "Fallback to fullstack due to parsing error." };
@@ -484,7 +441,7 @@ RULES:
         } catch (parseError) {
           console.warn("[ROUTER] AI failed to return JSON. Defaulting to fullstack.", parseError);
         }
-        
+
         // 🚀 FORCED OVERRIDE: If it's a new project, NEVER allow conversation mode.
         if (!isUpdateMode) plan.scope = "fullstack";
 
@@ -492,20 +449,20 @@ RULES:
 
         // 🚀 THE CONVERSATIONAL FAST-TRACK (Bypass Multi-Agent Pipeline)
         if (plan.scope === "conversation") {
-           const chatPrompt = `${finalPromptText}
+          const chatPrompt = `${finalPromptText}
            
            USER INTENT: The user is asking a question or asking for suggestions.
            TASK: Respond directly to the user in a friendly, helpful, senior-engineer tone. Provide the suggestions they asked for.
            CRITICAL RULE: DO NOT generate any <FILE_START>, <UPDATE>, or <DELETE> XML tags. Just output standard markdown text.`;
 
-           streamResult = await mainModel.generateContentStream(chatPrompt);
-           
-           const iterator = streamResult.stream[Symbol.asyncIterator]();
-           const firstYield = await iterator.next();
-           if (!firstYield.done) firstChunk = firstYield.value;
+          streamResult = await mainModel.generateContentStream(chatPrompt);
 
-           successfulKey = currentKey!;
-           break keyLoop; // Instantly escape the pipeline!
+          const iterator = streamResult.stream[Symbol.asyncIterator]();
+          const firstYield = await iterator.next();
+          if (!firstYield.done) firstChunk = firstYield.value;
+
+          successfulKey = currentKey!;
+          break keyLoop; // Instantly escape the pipeline!
         }
 
         let backendGeneratedCode = "";
@@ -514,7 +471,7 @@ RULES:
 
         // AGENT 2: BACKEND (Runs if fullstack or backend_only)
         if (plan.scope === "backend_only" || plan.scope === "fullstack") {
-           const backendResult = await mainModel.generateContent(`${finalPromptText} \n PLAN: ${JSON.stringify(plan)} \n
+          const backendResult = await mainModel.generateContent(`${finalPromptText} \n PLAN: ${JSON.stringify(plan)} \n
            FOCUS: Generate ONLY the backend files:
            - /lib/db.ts (in-memory database with realistic mock data)
            - /app/api/[feature]/route.ts (one route file per feature)
@@ -526,19 +483,19 @@ RULES:
            - Wrap every handler in try/catch. Return NextResponse.json() for all responses.
            - NEVER use NextApiRequest, NextApiResponse, or req.query. Use \`request.json()\` for body and \`new URL(request.url).searchParams\` for query params.
            `);
-           backendGeneratedCode = backendResult.response.text();
-           backendContext = backendGeneratedCode;
+          backendGeneratedCode = backendResult.response.text();
+          backendContext = backendGeneratedCode;
         } else {
-           // 🚀 FIX: ALWAYS pull the contract from the full currentFiles, NOT optimizedFiles! 
-           // If we use optimizedFiles, the RAG scanner might hide the APIs, causing the UI to hallucinate endpoints.
-           const existingBackendPaths = Object.keys(currentFiles || {}).filter(p => p.includes('/api/') || p.includes('db.ts') || p.includes('types') || p.includes('models'));
-           backendContext = existingBackendPaths.length > 0 ? existingBackendPaths.map(p => `--- ${p} ---\n${currentFiles[p]}`).join('\n\n') : "No backend context available.";
+          // 🚀 FIX: ALWAYS pull the contract from the full currentFiles, NOT optimizedFiles! 
+          // If we use optimizedFiles, the RAG scanner might hide the APIs, causing the UI to hallucinate endpoints.
+          const existingBackendPaths = Object.keys(currentFiles || {}).filter(p => p.includes('/api/') || p.includes('db.ts') || p.includes('types') || p.includes('models'));
+          backendContext = existingBackendPaths.length > 0 ? existingBackendPaths.map(p => `--- ${p} ---\n${currentFiles[p]}`).join('\n\n') : "No backend context available.";
         }
 
         // AGENT 3: FRONTEND (Runs if fullstack or frontend_only)
         if (plan.scope === "frontend_only" || plan.scope === "fullstack") {
-            const frontendPromptParts: Array<string | Part> = [
-              `${finalPromptText} \n PLAN: ${JSON.stringify(plan)} 
+          const frontendPromptParts: Array<string | Part> = [
+            `${finalPromptText} \n PLAN: ${JSON.stringify(plan)} 
               🛑 STRICT BACKEND CONTRACT (DO NOT MODIFY THESE): \n${backendContext}\n
 
               MASTER UI/UX DESIGNER DIRECTIVE:
@@ -567,25 +524,25 @@ RULES:
                  - Buttons & Elements: Always include prominent, beautifully styled Call-to-Action buttons (e.g., rounded-full bg-blue-600 hover:bg-blue-700 text-white shadow-lg transition-all px-6 py-2), colorful badges, and detailed footers.
               6. COMPOSITION & INTERACTIVITY: Build complex, realistic interfaces with hover states (hover:scale-[1.02]), loading spinners, and empty states. Use lucide-react heavily.
               `
-            ];
-            // Image handling
-            if (attachedImages && Array.isArray(attachedImages) && attachedImages.length > 0) {
-              frontendPromptParts.push(`\nVISION MODE ENGAGED. Analyze the images attached to recreate the UI.\n`);
-              attachedImages.forEach((img: string) => {
-                try {
-                  const mimeType = img.substring(img.indexOf(":") + 1, img.indexOf(";"));
-                  const base64Data = img.substring(img.indexOf(",") + 1);
-                  frontendPromptParts.push({ inlineData: { data: base64Data, mimeType } });
-                } catch (err) { }
-              });
-            }
-            const frontendResult = await mainModel.generateContent(frontendPromptParts);
-            frontendGeneratedCode = frontendResult.response.text();
+          ];
+          // Image handling
+          if (attachedImages && Array.isArray(attachedImages) && attachedImages.length > 0) {
+            frontendPromptParts.push(`\nVISION MODE ENGAGED. Analyze the images attached to recreate the UI.\n`);
+            attachedImages.forEach((img: string) => {
+              try {
+                const mimeType = img.substring(img.indexOf(":") + 1, img.indexOf(";"));
+                const base64Data = img.substring(img.indexOf(",") + 1);
+                frontendPromptParts.push({ inlineData: { data: base64Data, mimeType } });
+              } catch (err) { }
+            });
+          }
+          const frontendResult = await mainModel.generateContent(frontendPromptParts);
+          frontendGeneratedCode = frontendResult.response.text();
         }
 
         // AGENT 4: THE COMPILER PASS (Only reviews newly generated code to save tokens)
         const newlyGeneratedCode = backendGeneratedCode + "\n" + frontendGeneratedCode;
-        
+
         const reviewerPrompt = `You are the Ultimate Code Compiler and Senior Code Reviewer.
         Your job is to audit, fix, and finalize this generated code.
         
@@ -646,7 +603,7 @@ RULES:
         `;
 
         streamResult = await mainModel.generateContentStream(reviewerPrompt);
-        
+
         const iterator = streamResult.stream[Symbol.asyncIterator]();
         const firstYield = await iterator.next();
         if (!firstYield.done) firstChunk = firstYield.value;
@@ -656,14 +613,14 @@ RULES:
 
       } catch (e: unknown) {
         lastErrorDetails = e instanceof Error ? e.message : String(e);
-        
+
         // 🚀 THE KEY-LOOP FALLBACK FIX: Switch to a backup key if the current one is OUT of quota, INVALID, or UNAVAILABLE. 
         if (lastErrorDetails.includes("429") || lastErrorDetails.includes("Quota") || lastErrorDetails.includes("API key not valid") || lastErrorDetails.includes("400") || lastErrorDetails.includes("401") || lastErrorDetails.includes("503") || lastErrorDetails.includes("500") || lastErrorDetails.includes("502")) {
-            console.warn(`[API] Key failed with error: ${lastErrorDetails}. Trying next backup key...`);
-            continue; 
+          console.warn(`[API] Key failed with error: ${lastErrorDetails}. Trying next backup key...`);
+          continue;
         } else {
-            console.warn(`[API] Fatal error or unhandled status: ${lastErrorDetails}. Aborting pipeline.`);
-            break; 
+          console.warn(`[API] Fatal error or unhandled status: ${lastErrorDetails}. Aborting pipeline.`);
+          break;
         }
       }
     }
@@ -671,7 +628,7 @@ RULES:
     // 🚀 FIX: Unmask the actual Google API error so the frontend can catch rate limits!
     if (!streamResult) {
       return NextResponse.json(
-        { error: lastErrorDetails ? `API Error: ${lastErrorDetails}` : "The Multi-Agent Pipeline failed. Please check your API keys." }, 
+        { error: lastErrorDetails ? `API Error: ${lastErrorDetails}` : "The Multi-Agent Pipeline failed. Please check your API keys." },
         { status: 500 }
       );
     }
@@ -679,7 +636,7 @@ RULES:
     const stream = new ReadableStream({
       async start(controller) {
         let fullText = "";
-        
+
         const processChunk = (chunk: EnhancedGenerateContentResponse) => {
           const chunkText = chunk.text();
           fullText += chunkText;
@@ -689,7 +646,7 @@ RULES:
         try {
           // Send the probed chunk first
           if (firstChunk) processChunk(firstChunk);
-          
+
           // Then stream the rest naturally
           for await (const chunk of streamResult!.stream) {
             processChunk(chunk);
@@ -697,7 +654,7 @@ RULES:
         } catch (err) {
           controller.error(err);
         } finally {
-          controller.close(); 
+          controller.close();
         }
       }
     });
